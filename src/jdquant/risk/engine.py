@@ -154,13 +154,18 @@ class RiskEngine:
 
     # ---- pre-trade -------------------------------------------------------------------------
 
-    def evaluate(self, order: Order) -> RiskDecision:
+    def evaluate(self, order: Order, *, replacing: str | None = None) -> RiskDecision:
+        """Pre-trade decision; `replacing` excludes the order being modified from working exposure."""
         self._roll_day()
+        excluded = self._working.pop(replacing, None) if replacing else None
         try:
             checks = self._run_checks(order)
         except Exception:
             log.exception("risk evaluation failed for %s", order.order_id)
             return self._record(order, False, "RISK_EVALUATION_ERROR", ())
+        finally:
+            if excluded is not None:
+                self._working[replacing] = excluded
         failed = [c for c in checks if not c.passed]
         if self._is_reducing(order):
             failed = [c for c in failed if c.limit_type in NON_WAIVABLE]

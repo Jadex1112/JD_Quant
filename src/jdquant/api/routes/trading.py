@@ -17,6 +17,7 @@ from jdquant.api.schemas import (
     KillSwitchOut,
     KillSwitchReleaseIn,
     OrderIn,
+    OrderModifyIn,
     OrderOut,
     PositionOut,
     QuoteIn,
@@ -199,6 +200,28 @@ def get_order(order_id: str, request: Request, principal: Principal = Depends(re
 def cancel_order(order_id: str, request: Request, principal: Principal = Depends(require("order:cancel"))):
     order = ctx(request).platform.oms.cancel(order_id)
     _audit(request, principal, "order.cancel", "TRADING", order_id)
+    return order_out(order)
+
+
+@router.patch("/orders/{order_id}", response_model=OrderOut)
+@locked
+def modify_order(
+    order_id: str,
+    body: OrderModifyIn,
+    request: Request,
+    principal: Principal = Depends(require("order:modify")),
+):
+    order = ctx(request).platform.oms.modify(order_id, quantity=body.quantity, limit_price=body.limit_price)
+    _audit(
+        request,
+        principal,
+        "order.modify",
+        "TRADING",
+        order_id,
+        quantity=body.quantity,
+        limit_price=body.limit_price,
+        status=order.status.value,
+    )
     return order_out(order)
 
 

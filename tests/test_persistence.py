@@ -171,3 +171,16 @@ def test_orders_blocked_while_recovering(platform):
     assert platform.oms.submit(market(Side.BUY, "0.1")).reject_code == "PLATFORM_RECOVERING"
     platform.trading.mode = PlatformMode.SAFE
     assert platform.oms.submit(market(Side.BUY, "0.1")).reject_code == "PLATFORM_SAFE_MODE"
+
+
+def test_pending_modification_is_settled_on_restart(db):
+    clock = SimulatedClock(T0)
+    p1 = _boot(db, clock)
+    order = p1.oms.submit(limit(Side.BUY, "0.1", "49000"))
+    order.status, order.pending_quantity = S.PENDING_REPLACE, Decimal("0.2")
+    p1.store.put("order", order.order_id, encode(order))
+    p1.store.close()
+    p2 = _boot(db, clock)
+    restored = p2.oms.get(order.order_id)
+    assert restored.status is S.OPEN and restored.quantity == Decimal("0.1")
+    assert restored.pending_quantity is None

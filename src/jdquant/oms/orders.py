@@ -150,6 +150,11 @@ class Order:
     overfilled: bool = False
     history: list[StateTransition] = field(default_factory=list)
     status_before_cancel: OrderStatus | None = None
+    pending_quantity: Decimal | None = None
+    pending_limit_price: Decimal | None = None
+    replace_via_cancel: bool = False
+    replaces_order_id: str | None = None
+    replaced_by_order_id: str | None = None
 
     @property
     def remaining_quantity(self) -> Decimal:
@@ -197,6 +202,8 @@ class ReportType(StrEnum):
     CANCEL_REJECT = "CANCEL_REJECT"
     EXPIRED = "EXPIRED"
     NOT_FOUND = "NOT_FOUND"
+    REPLACED = "REPLACED"
+    REPLACE_REJECT = "REPLACE_REJECT"
 
 
 @dataclass(frozen=True)
@@ -216,3 +223,4 @@ class ExecutionReport:
     venue_trade_id: str | None = None
     reason: str | None = None
     is_simulated: bool = False
+    new_client_order_id: str | None = None

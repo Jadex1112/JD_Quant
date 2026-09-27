@@ -91,3 +91,14 @@ def test_backtest_endpoint(client):
 def test_quote_validation(client):
     bad = {"instrument_id": BTC, "bid_price": "10", "bid_size": "1", "ask_price": "9", "ask_size": "1"}
     assert client.post("/api/v1/market-data/quotes", json=bad).status_code == 400
+
+
+def test_modify_order_endpoint(client):
+    order = client.post("/api/v1/orders", json=_order(order_type="LIMIT", limit_price="49000")).json()
+    resp = client.patch(
+        f"/api/v1/orders/{order['order_id']}", json={"limit_price": "48900", "quantity": "0.2"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["limit_price"] == "48900" and resp.json()["quantity"] == "0.2"
+    bad = client.patch(f"/api/v1/orders/{order['order_id']}", json={"limit_price": "48900.001"})
+    assert bad.status_code == 400

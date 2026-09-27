@@ -100,6 +100,25 @@ class SimulatedVenue:
         else:
             self._emit(ReportType.CANCELED, order)
 
+    supports_replace = True
+
+    def replace(self, order: Order, quantity: Decimal, limit_price: Decimal) -> None:
+        """Native amend: keeps the order's identity; a now-marketable price fills as taker."""
+        if order.client_order_id not in self._resting:
+            self._emit(ReportType.REPLACE_REJECT, order, reason="ORDER_NOT_WORKING")
+            return
+        reference = self._market.reference_price(order.instrument_id)
+        crosses = reference is not None and (
+            limit_price >= reference if order.side is Side.BUY else limit_price <= reference
+        )
+        if order.post_only and crosses:
+            self._emit(ReportType.REPLACE_REJECT, order, reason="POST_ONLY_WOULD_TAKE")
+            return
+        self._emit(ReportType.REPLACED, order, price=limit_price, quantity=quantity)
+        if crosses and self.fill_timing is FillTiming.IMMEDIATE:
+            del self._resting[order.client_order_id]
+            self._fill(order, reference, Liquidity.TAKER)
+
     def restore_working(self, order: Order) -> None:
         """Rebuild the simulated book from persisted working orders after a restart."""
         self._known.add(order.client_order_id)

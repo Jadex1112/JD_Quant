@@ -340,3 +340,8 @@ class RiskProfileIO(BaseModel):
     limits: list[RiskLimitOut]
     restricted_instruments: list[str] = Field(default_factory=list)
     active: bool = True
+
+
+class OrderModifyIn(BaseModel):
+    quantity: Dec | None = None
+    limit_price: Dec | None = None

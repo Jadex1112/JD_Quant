@@ -10,7 +10,7 @@ from decimal import Decimal
 from typing import Protocol
 
 from jdquant.core.clock import Clock
-from jdquant.core.errors import NotFoundError, PlatformError
+from jdquant.core.errors import NotFoundError, PlatformError, ValidationError
 from jdquant.core.events import EventBus
 from jdquant.core.ids import IdGenerator, UuidIds
 from jdquant.marketdata.instruments import InstrumentRegistry, InstrumentStatus
@@ -37,10 +37,13 @@ class RiskUnavailable(Exception):
 
 
 class RiskGate(Protocol):
-    def evaluate(self, order: Order): ...
+    def evaluate(self, order: Order, *, replacing: str | None = None): ...
 
 
 class ExecutionRouter(Protocol):
+    """Venue access. Routers that can amend orders in place also expose `supports_replace = True`
+    and `replace(order, quantity, limit_price)`; others are modified by cancel-then-new (FR-21025)."""
+
     def submit(self, order: Order) -> None: ...
     def cancel(self, order: Order) -> None: ...
     def query(self, order: Order) -> None: ...
@@ -261,6 +264,101 @@ class OrderManager:
                 canceled.append(self.cancel(order.order_id))
         return canceled
 
+    # ---- modification (FR-21024, FR-21025) --------------------------------------------------
+
+    def modify(
+        self,
+        order_id: str,
+        *,
+        quantity: Decimal | None = None,
+        limit_price: Decimal | None = None,
+    ) -> Order:
+        order = self.get(order_id)
+        if order.status not in (S.OPEN, S.PARTIALLY_FILLED):
+            raise PlatformError(
+                "ORDER_NOT_MODIFIABLE", f"order in state {order.status.value} cannot be modified"
+            )
+        if order.order_type not in (OrderType.LIMIT, OrderType.STOP_LIMIT):
+            raise PlatformError("ORDER_NOT_MODIFIABLE", "only limit orders can be modified")
+        new_qty = order.quantity if quantity is None else quantity
+        new_price = order.limit_price if limit_price is None else limit_price
+        if new_qty == order.quantity and new_price == order.limit_price:
+            raise PlatformError("ORDER_UNCHANGED", "the modification changes nothing")
+        instrument = self._instruments.get(order.instrument_id)
+        violations = []
+        if new_qty <= order.filled_quantity:
+            violations.append({"field": "quantity", "message": "must exceed the filled quantity (BR-21-02)"})
+        elif not instrument.is_quantity_aligned(new_qty):
+            violations.append(
+                {"field": "quantity", "message": f"must be a multiple of lot size {instrument.lot_size}"}
+            )
+        if new_price is None or not instrument.is_price_aligned(new_price):
+            violations.append(
+                {"field": "limit_price", "message": f"must be a multiple of tick size {instrument.tick_size}"}
+            )
+        if violations:
+            raise ValidationError("ORDER_VALIDATION_FAILED", violations)
+
+        more_aggressive = (new_price - order.limit_price) * order.side.sign > 0
+        if new_qty > order.quantity or more_aggressive:
+            candidate = copy.copy(order)
+            candidate.quantity = new_qty - order.filled_quantity
+            candidate.filled_quantity = Decimal(0)
+            candidate.limit_price = new_price
+            try:
+                decision = self._risk.evaluate(candidate, replacing=order.order_id)
+            except RiskUnavailable:
+                decision = None
+            if decision is None or not decision.approved:
+                code = decision.reason_code if decision else "RISK_UNAVAILABLE"
+                raise PlatformError(code or "RISK_REJECTED", "modification rejected by pre-trade risk")
+
+        order.pending_quantity, order.pending_limit_price = new_qty, new_price
+        if getattr(self._router, "supports_replace", False):
+            order.status_before_cancel = order.status
+            self._transition(order, S.PENDING_REPLACE)
+            self._router.replace(order, new_qty, new_price)
+        else:
+            order.replace_via_cancel = True
+            order.status_before_cancel = order.status
+            self._transition(order, S.PENDING_CANCEL, "cancel for replace")
+            self._router.cancel(order)
+        return order
+
+    def _clear_pending(self, order: Order) -> None:
+        order.pending_quantity = order.pending_limit_price = None
+        order.replace_via_cancel = False
+
+    def _submit_replacement(self, order: Order) -> None:
+        """Cancel confirmed: size the new order from what is left after racing fills."""
+        remaining = (order.pending_quantity or order.quantity) - order.filled_quantity
+        price = order.pending_limit_price
+        self._clear_pending(order)
+        if remaining <= 0:
+            return
+        replacement = self.submit(
+            OrderRequest(
+                account_id=order.account_id,
+                instrument_id=order.instrument_id,
+                side=order.side,
+                order_type=order.order_type,
+                quantity=remaining,
+                limit_price=price,
+                stop_price=order.stop_price,
+                time_in_force=order.time_in_force,
+                deployment_id=order.deployment_id,
+                post_only=order.post_only,
+                reduce_only=order.reduce_only,
+                source=order.source,
+                submitter=order.submitter,
+                signal_id=order.signal_id,
+                tags={**order.tags, "replaces": order.order_id},
+            )
+        )
+        replacement.replaces_order_id = order.order_id
+        order.replaced_by_order_id = replacement.order_id
+        self._publish("order.replaced", order)
+
     # ---- execution reports ------------------------------------------------------------------
 
     def on_execution_report(self, report: ExecutionReport) -> None:
@@ -289,11 +387,32 @@ class OrderManager:
                 self._apply_fill(order, report)
             case ReportType.CANCELED:
                 if not order.is_terminal:
-                    self._transition(order, S.CANCELED, report.reason)
+                    replacing = order.replace_via_cancel
+                    self._transition(order, S.CANCELED, "replaced" if replacing else report.reason)
+                    if replacing:
+                        self._submit_replacement(order)
             case ReportType.CANCEL_REJECT:
                 if order.status is S.PENDING_CANCEL and order.status_before_cancel is not None:
+                    self._clear_pending(order)
                     target = S.PARTIALLY_FILLED if order.filled_quantity > 0 else S.OPEN
                     self._transition(order, target, "cancel rejected")
+            case ReportType.REPLACED:
+                if order.status is S.PENDING_REPLACE:
+                    order.quantity = order.pending_quantity or order.quantity
+                    order.limit_price = order.pending_limit_price or order.limit_price
+                    if report.new_client_order_id:
+                        self._by_client_id[report.new_client_order_id] = order
+                        order.client_order_id = report.new_client_order_id
+                    if report.venue_order_id:
+                        order.venue_order_id = report.venue_order_id
+                    self._clear_pending(order)
+                    target = S.PARTIALLY_FILLED if order.filled_quantity > 0 else S.OPEN
+                    self._transition(order, target, "modified")
+            case ReportType.REPLACE_REJECT:
+                if order.status is S.PENDING_REPLACE:
+                    self._clear_pending(order)
+                    target = S.PARTIALLY_FILLED if order.filled_quantity > 0 else S.OPEN
+                    self._transition(order, target, f"modify rejected: {report.reason}")
             case ReportType.EXPIRED:
                 if not order.is_terminal:
                     self._transition(order, S.EXPIRED, report.reason)
@@ -368,7 +487,7 @@ class OrderManager:
             )
         elif order.filled_quantity >= order.quantity:
             self._transition(order, S.FILLED)
-        elif order.status in (S.SUBMITTED, S.OPEN, S.UNKNOWN, S.PENDING_REPLACE):
+        elif order.status in (S.SUBMITTED, S.OPEN, S.UNKNOWN):
             self._transition(order, S.PARTIALLY_FILLED)
 
     # ---- timeouts ---------------------------------------------------------------------------
@@ -425,6 +544,11 @@ class OrderManager:
                     self._router.query(order)
                 case S.PENDING_CANCEL:
                     self._router.cancel(order)
+                case S.PENDING_REPLACE:
+                    self._clear_pending(order)
+                    target = S.PARTIALLY_FILLED if order.filled_quantity > 0 else S.OPEN
+                    self._transition(order, target, "modify outcome unknown at restart")
+                    self._router.query(order)
                 case _:
                     continue
             actions.append(f"{order.order_id}: {order.status.value}")

@@ -79,7 +79,12 @@ def recover(platform, store: Store) -> RecoveryReport:
     )
 
     restore_working = getattr(platform.venue, "restore_working", None)
-    acknowledged = (OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED, OrderStatus.PENDING_CANCEL)
+    acknowledged = (
+        OrderStatus.OPEN,
+        OrderStatus.PARTIALLY_FILLED,
+        OrderStatus.PENDING_CANCEL,
+        OrderStatus.PENDING_REPLACE,
+    )
     working = [o for o in orders if o.status in acknowledged]
     if restore_working is not None:
         for order in working:

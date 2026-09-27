@@ -56,7 +56,7 @@ def test_rounding_mode_rounds_passively(clock):
 
 
 class _NoRisk:
-    def evaluate(self, order):
+    def evaluate(self, order, **kwargs):
         raise RiskUnavailable()
 
 
@@ -176,3 +176,96 @@ def test_timeouts_do_not_touch_acknowledged_orders(platform):
     assert platform.oms.check_timeouts() == []
     assert order.status is S.OPEN
     assert isinstance(platform.clock, SimulatedClock)
+
+
+# ---- modification (FR-21024, FR-21025) ---------------------------------------------------------
+
+
+def test_native_modify_keeps_identity_and_skips_risk_when_reducing(platform, monkeypatch):
+    order = platform.oms.submit(limit(Side.BUY, "0.2", "49000"))
+    calls = []
+    original = platform.risk.evaluate
+    monkeypatch.setattr(platform.risk, "evaluate", lambda o, **kw: calls.append(o) or original(o, **kw))
+    platform.oms.modify(order.order_id, quantity=Decimal("0.1"), limit_price=Decimal("48500"))
+    assert order.status is S.OPEN and order.quantity == Decimal("0.1") and order.limit_price == Decimal(48500)
+    assert calls == []
+    assert [t.to_status for t in order.history][-2:] == [S.PENDING_REPLACE, S.OPEN]
+
+
+def test_risk_increasing_modify_is_rechecked(platform):
+    from jdquant.risk.engine import LimitType, RiskLimit, RiskProfile, Scope
+
+    platform.risk.set_profiles(
+        [RiskProfile("p", Scope.WORKSPACE, [RiskLimit(LimitType.MAX_POSITION_QUANTITY, Decimal("0.5"))])]
+    )
+    order = platform.oms.submit(limit(Side.BUY, "0.4", "49000"))
+    # the order's own 0.4 is not double counted: growing it to 0.5 is allowed, 0.6 is not
+    platform.oms.modify(order.order_id, quantity=Decimal("0.5"))
+    assert order.quantity == Decimal("0.5")
+    import pytest
+
+    from jdquant.core.errors import PlatformError
+
+    with pytest.raises(PlatformError) as err:
+        platform.oms.modify(order.order_id, quantity=Decimal("0.6"))
+    assert err.value.code == "RISK_MAX_POSITION_QUANTITY"
+    assert order.status is S.OPEN and order.quantity == Decimal("0.5")
+
+
+def test_modify_to_marketable_price_fills(platform):
+    order = platform.oms.submit(limit(Side.BUY, "0.1", "49000"))
+    platform.oms.modify(order.order_id, limit_price=Decimal("50500"))
+    assert order.status is S.FILLED and order.average_fill_price == Decimal(50000)
+
+
+def test_modify_cannot_go_below_filled_quantity(clock):
+    import pytest
+
+    from jdquant.core.errors import ValidationError
+
+    oms, _, p = _oms(clock)
+    from conftest import set_quote
+
+    set_quote(p, BTC, "49999", "50001")
+    order = oms.submit(limit(Side.BUY, "1", "49000"))
+    oms.on_execution_report(_report(order, ReportType.ACK))
+    oms.on_execution_report(
+        _report(order, ReportType.FILL, price=Decimal(49000), quantity=Decimal("0.6"), venue_trade_id="a")
+    )
+    with pytest.raises(ValidationError):
+        oms.modify(order.order_id, quantity=Decimal("0.5"))
+
+
+def test_cancel_then_new_sizes_replacement_after_racing_fill(clock):
+    """FR-21025: without native replace, the replacement never exceeds the intent."""
+    oms, router, p = _oms(clock)
+    from conftest import set_quote
+
+    set_quote(p, BTC, "49999", "50001")
+    order = oms.submit(limit(Side.BUY, "1", "49000"))
+    oms.on_execution_report(_report(order, ReportType.ACK))
+    oms.modify(order.order_id, quantity=Decimal("0.8"), limit_price=Decimal("49100"))
+    assert order.status is S.PENDING_CANCEL
+    oms.on_execution_report(
+        _report(order, ReportType.FILL, price=Decimal(49000), quantity=Decimal("0.3"), venue_trade_id="race")
+    )
+    assert order.status is S.PENDING_CANCEL
+    oms.on_execution_report(_report(order, ReportType.CANCELED))
+    assert order.status is S.CANCELED
+    replacement = oms.get(order.replaced_by_order_id)
+    assert replacement.quantity == Decimal("0.5") and replacement.limit_price == Decimal(49100)
+    assert replacement.replaces_order_id == order.order_id
+    assert router.submitted[-1] is replacement
+
+
+def test_non_limit_orders_cannot_be_modified(platform):
+    import pytest
+
+    from jdquant.core.errors import PlatformError
+
+    order = platform.oms.submit(limit(Side.BUY, "0.1", "49000"))
+    with pytest.raises(PlatformError):
+        platform.oms.modify(order.order_id)
+    filled = platform.oms.submit(market(Side.BUY, "0.1"))
+    with pytest.raises(PlatformError):
+        platform.oms.modify(filled.order_id, quantity=Decimal("0.2"))
