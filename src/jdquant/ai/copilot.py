@@ -364,4 +364,7 @@ def _error(tool_use_id: str, message: str) -> dict[str, Any]:
 def _default_client() -> Any:
     import anthropic
 
+    # The SDK only discovers missing credentials when a request is sent; fail early with a clear message.
+    if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
+        raise RuntimeError("ANTHROPIC_API_KEY is not set")
     return anthropic.Anthropic()

@@ -34,6 +34,7 @@ class Settings:
     allow_setup: bool = True
     background_polling: bool = False
     poll_interval: float = 2.0
+    web_dir: Path | None = None  # built web UI; defaults to the bundled jdquant/web_dist
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -45,6 +46,7 @@ class Settings:
             allow_setup=_flag("JDQ_ALLOW_SETUP", True),
             background_polling=_flag("JDQ_BACKGROUND_POLLING", True),
             poll_interval=float(os.environ.get("JDQ_POLL_INTERVAL", "2")),
+            web_dir=Path(os.environ["JDQ_WEB_DIR"]) if os.environ.get("JDQ_WEB_DIR") else None,
         )
 
 

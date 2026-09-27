@@ -434,6 +434,19 @@ def test_copilot_unavailable_without_credentials(platform):
         copilot.send(principal, conv.conversation_id, "hi")
 
 
+def test_default_client_reports_missing_api_key(platform, monkeypatch):
+    from jdquant.ai.copilot import _default_client
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    copilot, _ = _copilot(platform, None)
+    copilot._client_factory = _default_client
+    principal = _principal(["QUANT_TRADER"])
+    conv = copilot.start(principal)
+    with pytest.raises(PlatformError, match="set ANTHROPIC_API_KEY"):
+        copilot.send(principal, conv.conversation_id, "hi")
+
+
 def test_daily_quota_is_enforced(platform):
     fake = FakeClaude(reply(Block("text", text="ok")), reply(Block("text", text="ok")))
     copilot, _ = _copilot(platform, fake, daily_token_budget=100)

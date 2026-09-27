@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from jdquant import __version__
 from jdquant.api.context import AppContext, Settings, build_context
@@ -29,6 +30,8 @@ _STATUS_BY_CODE = {
     "COPILOT_QUOTA_EXCEEDED": 429,
     "COPILOT_ACTION_PENDING": 409,
 }
+
+WEB_DIST = Path(__file__).resolve().parent.parent / "web_dist"
 
 
 def _problem(status: int, error: PlatformError, request: Request) -> JSONResponse:
@@ -107,7 +110,27 @@ def create_app(
 
     for module in (auth, admin, trading, research, connections, ai):
         app.include_router(module.router)
+    _mount_web(app, c.settings.web_dir or WEB_DIST)
     return app
+
+
+def _mount_web(app: FastAPI, web_dir: Path) -> None:
+    """Serve the single-page web UI (Chapter 70); unknown non-API paths fall back to index.html."""
+    root = web_dir.resolve()
+    index = root / "index.html"
+    if not index.is_file():
+        return
+
+    @app.get("/{path:path}", include_in_schema=False)
+    def web(path: str) -> FileResponse:
+        if path == "api" or path.startswith("api/"):
+            raise NotFoundError("NOT_FOUND", f"no API route /{path}")
+        candidate = (root / path).resolve()
+        if path and candidate.is_file() and candidate.is_relative_to(root):
+            # Vite fingerprints everything under assets/, so those can be cached forever.
+            cache = "public, max-age=31536000, immutable" if path.startswith("assets/") else "no-cache"
+            return FileResponse(candidate, headers={"Cache-Control": cache})
+        return FileResponse(index, headers={"Cache-Control": "no-cache"})
 
 
 def app_factory() -> FastAPI:

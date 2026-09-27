@@ -102,3 +102,29 @@ def test_modify_order_endpoint(client):
     assert resp.json()["limit_price"] == "48900" and resp.json()["quantity"] == "0.2"
     bad = client.patch(f"/api/v1/orders/{order['order_id']}", json={"limit_price": "48900.001"})
     assert bad.status_code == 400
+
+
+def test_web_ui_served_with_spa_fallback(platform, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from jdquant.api.app import create_app
+    from jdquant.api.context import Settings
+
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "index.html").write_text("<div id=root></div>")
+    (tmp_path / "assets" / "app-1234.js").write_text("console.log(1)")
+    (tmp_path.parent / "secret.txt").write_text("nope")
+    web = TestClient(create_app(platform, settings=Settings(web_dir=tmp_path)))
+
+    index = web.get("/")
+    assert index.status_code == 200 and "root" in index.text
+    assert index.headers["cache-control"] == "no-cache"
+    assert "default-src 'self'" in index.headers["content-security-policy"]
+    deep_link = web.get("/trading")
+    assert deep_link.status_code == 200 and "root" in deep_link.text
+    asset = web.get("/assets/app-1234.js")
+    assert asset.text == "console.log(1)" and "immutable" in asset.headers["cache-control"]
+    assert "root" in web.get("/..%2Fsecret.txt").text  # traversal falls back to index, never escapes
+    missing_api = web.get("/api/v1/nope")
+    assert missing_api.status_code == 404 and missing_api.json()["code"] == "NOT_FOUND"
+    assert web.get("/api/v1/health").json()["status"] == "OPERATIONAL"
