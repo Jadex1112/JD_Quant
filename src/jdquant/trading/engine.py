@@ -91,6 +91,7 @@ class Deployment:
     state: DeploymentState = DeploymentState.DRAFT
     state_reason: str | None = None
     approved_by: str | None = None
+    bar_interval_seconds: int = 60
     history: list[tuple[DeploymentState, DeploymentState, datetime, str | None]] = field(default_factory=list)
 
 
@@ -237,6 +238,7 @@ class TradingEngine:
         parameters: dict[str, Any],
         instruments: list[str],
         created_by: str,
+        bar_interval_seconds: int = 60,
     ) -> Deployment:
         account = self.get_account(account_id)
         for other in self.deployments.values():
@@ -257,6 +259,7 @@ class TradingEngine:
             parameters=dict(parameters),
             instruments=list(instruments),
             created_by=created_by,
+            bar_interval_seconds=bar_interval_seconds,
         )
         self.deployments[deployment.deployment_id] = deployment
         self._bus.publish("deployment.created", {"deployment_id": deployment.deployment_id}, producer="lte")

@@ -175,3 +175,168 @@ class StrategyTemplateOut(BaseModel):
     version: str
     description: str
     parameters: dict[str, dict[str, Any]]
+
+
+# ---- identity -----------------------------------------------------------------------------------
+
+
+class LoginIn(BaseModel):
+    email: str
+    password: str
+    code: str | None = None
+
+
+class SetupIn(BaseModel):
+    email: str
+    display_name: str
+    password: str
+
+
+class UserOut(BaseModel):
+    user_id: str
+    email: str
+    display_name: str
+    roles: list[str]
+    status: str
+    mfa_enabled: bool
+    last_login_at: datetime | None
+
+
+class MeOut(UserOut):
+    permissions: list[str]
+    auth_method: str
+    mfa_recent: bool
+
+
+class LoginOut(BaseModel):
+    token: str
+    csrf_token: str
+    expires_at: datetime
+    user: MeOut
+
+
+class UserCreateIn(BaseModel):
+    email: str
+    display_name: str
+    password: str
+    roles: list[str]
+
+
+class RolesIn(BaseModel):
+    roles: list[str]
+
+
+class StatusIn(BaseModel):
+    status: str
+
+
+class PasswordChangeIn(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class CodeIn(BaseModel):
+    code: str
+
+
+class MfaEnrollOut(BaseModel):
+    secret: str
+    provisioning_uri: str
+
+
+class RecoveryCodesOut(BaseModel):
+    recovery_codes: list[str]
+
+
+class SessionOut(BaseModel):
+    session_id: str
+    created_at: datetime
+    last_activity_at: datetime
+    ip_address: str
+    user_agent: str
+    current: bool
+
+
+class ApiKeyIn(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    scopes: list[str]
+    days: int = 90
+
+
+class ApiKeyOut(BaseModel):
+    key_id: str
+    name: str
+    scopes: list[str]
+    created_at: datetime
+    expires_at: datetime
+    revoked_at: datetime | None
+    last_used_at: datetime | None
+
+
+class ApiKeyCreatedOut(ApiKeyOut):
+    api_key: str
+
+
+class AuditOut(BaseModel):
+    seq: int
+    audit_id: str
+    at: str
+    actor: str
+    action: str
+    category: str
+    target: str | None
+    outcome: str
+    data: dict[str, Any]
+
+
+# ---- accounts, deployments, risk ------------------------------------------------------------------
+
+
+class AccountOut(BaseModel):
+    account_id: str
+    name: str
+    venue: str
+    mode: str
+    base_currency: str
+    status: str
+
+
+class AccountStatusIn(BaseModel):
+    status: str
+
+
+class DeploymentIn(BaseModel):
+    strategy: str
+    account_id: str
+    instruments: list[str] = Field(min_length=1)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    interval_seconds: int = Field(default=60, ge=1)
+
+
+class DeploymentOut(BaseModel):
+    deployment_id: str
+    strategy_name: str
+    strategy_version: str
+    account_id: str
+    mode: str
+    parameters: dict[str, Any]
+    instruments: list[str]
+    state: str
+    state_reason: str | None
+    created_by: str
+    approved_by: str | None
+
+
+class RiskLimitOut(BaseModel):
+    limit_type: LimitType
+    threshold: Dec
+    action: str = "REJECT"
+
+
+class RiskProfileIO(BaseModel):
+    name: str
+    scope: str
+    target_id: str | None = None
+    limits: list[RiskLimitOut]
+    restricted_instruments: list[str] = Field(default_factory=list)
+    active: bool = True

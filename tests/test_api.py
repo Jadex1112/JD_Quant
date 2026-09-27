@@ -1,13 +1,10 @@
 import pytest
-from conftest import BTC
-from fastapi.testclient import TestClient
-
-from jdquant.api.app import create_app
+from conftest import BTC, login_client
 
 
 @pytest.fixture
 def client(platform):
-    return TestClient(create_app(platform))
+    return login_client(platform)
 
 
 def _order(**kw):

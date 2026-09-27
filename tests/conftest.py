@@ -43,3 +43,25 @@ def limit(side: Side, qty: str, price: str, instrument_id: str = BTC, **kw) -> O
     return OrderRequest(
         PAPER_ACCOUNT_ID, instrument_id, side, OrderType.LIMIT, Decimal(qty), limit_price=Decimal(price), **kw
     )
+
+
+OWNER = {"email": "owner@example.com", "display_name": "Owner", "password": "correct-horse-battery"}
+
+
+def make_app(platform, *, enforce_mfa: bool = False):
+    from jdquant.api.app import create_app
+    from jdquant.api.context import Settings
+
+    return create_app(platform, settings=Settings(enforce_mfa_for_privileged=enforce_mfa))
+
+
+def login_client(platform, *, enforce_mfa: bool = False):
+    """Test client authenticated as the bootstrap owner (all roles)."""
+    from fastapi.testclient import TestClient
+
+    client = TestClient(make_app(platform, enforce_mfa=enforce_mfa))
+    assert client.post("/api/v1/setup", json=OWNER).status_code == 201
+    token = client.post("/api/v1/auth/login", json={"email": OWNER["email"], "password": OWNER["password"]})
+    client.cookies.clear()
+    client.headers["Authorization"] = f"Bearer {token.json()['token']}"
+    return client
