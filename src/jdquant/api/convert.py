@@ -10,9 +10,10 @@ from jdquant.api.schemas import (
     RiskLimitOut,
     RiskProfileIO,
 )
+from jdquant.connectivity.connections import markets_of
 from jdquant.oms.orders import Order
 from jdquant.risk.engine import RiskProfile
-from jdquant.trading.engine import Deployment, KillSwitch, TradingAccount
+from jdquant.trading.engine import AccountMode, Deployment, KillSwitch, TradingAccount
 
 
 def order_out(order: Order) -> OrderOut:
@@ -63,6 +64,7 @@ def account_out(account: TradingAccount) -> AccountOut:
         mode=account.mode.value,
         base_currency=account.base_currency,
         status=account.status.value,
+        markets=list(markets_of(account.venue)) if account.mode is AccountMode.LIVE else ["*"],
     )
 
 

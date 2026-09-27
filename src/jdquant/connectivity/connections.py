@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import logging
+import secrets as pysecrets
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
+from typing import Any
 
 import httpx
 
 from jdquant.connectivity.alpaca import AlpacaAdapter
 from jdquant.connectivity.base import Environment, VenueAdapter, VenueError, VenueTimeout
 from jdquant.connectivity.binance import BinanceSpotAdapter
+from jdquant.connectivity.fyers import FyersAdapter
 from jdquant.core.errors import NotFoundError, PlatformError, ValidationError
 from jdquant.marketdata.instruments import Instrument
 from jdquant.persistence.codec import decode, encode
@@ -24,7 +27,20 @@ from jdquant.trading.engine import AccountMode, TradingAccount
 
 log = logging.getLogger(__name__)
 
-ADAPTERS: dict[str, type[VenueAdapter]] = {"BINANCE": BinanceSpotAdapter, "ALPACA": AlpacaAdapter}
+ADAPTERS: dict[str, type[VenueAdapter]] = {
+    "BINANCE": BinanceSpotAdapter,
+    "ALPACA": AlpacaAdapter,
+    "FYERS": FyersAdapter,
+}
+LOGIN_STATE_TTL = timedelta(minutes=15)
+
+
+def markets_of(venue: str) -> tuple[str, ...]:
+    """Instrument venues reachable through a connection to `venue` (a broker may front an exchange)."""
+    adapter = ADAPTERS.get(venue)
+    return (adapter.markets or (venue,)) if adapter else (venue,)
+
+
 HttpFactory = Callable[[str], httpx.Client]
 
 
@@ -32,6 +48,7 @@ class ConnectionStatus(StrEnum):
     CONNECTED = "CONNECTED"
     DEGRADED = "DEGRADED"
     AUTH_FAILED = "AUTH_FAILED"
+    LOGIN_REQUIRED = "LOGIN_REQUIRED"
     DISABLED = "DISABLED"
     UNKNOWN = "UNKNOWN"
 
@@ -52,6 +69,9 @@ class Connection:
     clock_offset_ms: float | None = None
     instrument_count: int = 0
     watchlist: list[str] = field(default_factory=list)
+    settings: dict[str, Any] = field(default_factory=dict)
+    session_expires_at: datetime | None = None
+    base_currency: str = "USD"
 
 
 class ConnectionManager:
@@ -64,6 +84,7 @@ class ConnectionManager:
         self._http_factory = http_factory
         self.connections: dict[str, Connection] = {}
         self.adapters: dict[str, VenueAdapter] = {}
+        self._login_states: dict[str, tuple[str, datetime]] = {}
 
     # ---- lifecycle ----------------------------------------------------------------------------
 
@@ -77,6 +98,7 @@ class ConnectionManager:
         api_key: str | None = None,
         api_secret: str | None = None,
         base_currency: str = "USD",
+        settings: dict[str, Any] | None = None,
     ) -> Connection:
         venue = venue.upper()
         if venue not in ADAPTERS:
@@ -95,8 +117,23 @@ class ConnectionManager:
             created_by=actor,
             created_at=self._platform.clock.now(),
             has_credentials=bool(api_key),
+            settings=dict(settings or {}),
+            base_currency=base_currency,
         )
         adapter = self._build(connection, api_key, api_secret)
+        if adapter.requires_login:
+            # Broker OAuth: store the app credentials now; trading starts after the user signs in.
+            if not api_key:
+                raise ValidationError(
+                    "CREDENTIALS_REQUIRED",
+                    [{"field": "api_key", "message": "app id and secret are required"}],
+                )
+            self._secrets.put(self._secret_name(connection, "key"), api_key)
+            self._secrets.put(self._secret_name(connection, "secret"), api_secret or "")
+            connection.status = ConnectionStatus.LOGIN_REQUIRED
+            self._attach(connection, adapter)
+            self._save(connection)
+            return connection
         self._verify(connection, adapter)
         instruments = self._sync_instruments(connection, adapter)
         if api_key:
@@ -124,7 +161,14 @@ class ConnectionManager:
             if connection.has_credentials:
                 key = self._secrets.get(self._secret_name(connection, "key"))
                 secret = self._secrets.get(self._secret_name(connection, "secret"))
-            self._attach(connection, self._build(connection, key, secret))
+            try:
+                adapter = self._build(connection, key, secret)
+            except PlatformError:
+                log.exception("cannot restore connection %s", connection.connection_id)
+                continue
+            if adapter.requires_login:
+                self._restore_session(connection, adapter)
+            self._attach(connection, adapter)
 
     def test(self, connection_id: str) -> Connection:
         connection = self.get(connection_id)
@@ -138,6 +182,84 @@ class ConnectionManager:
             raise
         self._save(connection)
         return connection
+
+    # ---- broker login (OAuth) ---------------------------------------------------------------
+
+    def begin_login(self, connection_id: str, redirect_uri: str) -> str:
+        """Return the broker sign-in URL; the one-time `state` ties the redirect back to this connection."""
+        connection = self.get(connection_id)
+        adapter = self.adapters.get(connection_id)
+        if adapter is None or not adapter.requires_login:
+            raise PlatformError("LOGIN_NOT_SUPPORTED", f"{connection.venue} connections use API keys")
+        now = self._platform.clock.now()
+        self._login_states = {k: v for k, v in self._login_states.items() if v[1] > now}
+        state = pysecrets.token_urlsafe(24)
+        self._login_states[state] = (connection_id, now + LOGIN_STATE_TTL)
+        return adapter.login_url(redirect_uri, state)
+
+    def complete_login(self, state: str, auth_code: str) -> Connection:
+        entry = self._login_states.pop(state, None)
+        if entry is None or entry[1] <= self._platform.clock.now():
+            raise PlatformError("LOGIN_STATE_INVALID", "the sign-in link has expired; start again")
+        connection = self.get(entry[0])
+        adapter = self.adapters[connection.connection_id]
+        try:
+            adapter.complete_login(auth_code)
+        except (VenueError, VenueTimeout) as exc:
+            connection.status, connection.last_error = ConnectionStatus.LOGIN_REQUIRED, str(exc)
+            self._save(connection)
+            raise PlatformError("LOGIN_FAILED", f"{connection.venue} sign-in failed: {exc}") from None
+        self._persist_session(connection, adapter)
+        self._verify(connection, adapter)
+        if not connection.instrument_count:
+            connection.instrument_count = len(self._sync_instruments(connection, adapter))
+        if connection.account_id is None:
+            connection.account_id = f"{connection.venue.lower()}-{connection.connection_id[:8]}"
+            self._platform.trading.register_account(
+                TradingAccount(
+                    connection.account_id,
+                    connection.name,
+                    connection.venue,
+                    AccountMode.LIVE,
+                    connection.base_currency,
+                )
+            )
+        self._attach(connection, adapter)
+        self._save(connection)
+        return connection
+
+    def set_pin(self, connection_id: str, pin: str | None) -> Connection:
+        """Keep (encrypted) or forget the broker PIN that lets the platform renew sessions unattended."""
+        connection = self.get(connection_id)
+        adapter = self.adapters.get(connection_id)
+        if adapter is None or not adapter.requires_login:
+            raise PlatformError("LOGIN_NOT_SUPPORTED", f"{connection.venue} connections use API keys")
+        adapter.pin = pin or None
+        self._persist_session(connection, adapter)
+        self._save(connection)
+        return connection
+
+    def _restore_session(self, connection: Connection, adapter: VenueAdapter) -> None:
+        session = {
+            part: self._secrets.get(self._secret_name(connection, part))
+            for part in ("access_token", "refresh_token", "pin")
+            if self._secrets.exists(self._secret_name(connection, part))
+        }
+        adapter.set_session(session)
+        adapter.on_session_changed = lambda _s: self._persist_session(connection, adapter)
+        if not adapter.is_ready():
+            connection.status = ConnectionStatus.LOGIN_REQUIRED
+
+    def _persist_session(self, connection: Connection, adapter: VenueAdapter) -> None:
+        for part, value in adapter.session().items():
+            name = self._secret_name(connection, part)
+            if value:
+                self._secrets.put(name, value)
+            elif self._secrets.exists(name):
+                self._secrets.delete(name)
+        adapter.on_session_changed = lambda _s: self._persist_session(connection, adapter)
+        connection.session_expires_at = adapter.session_expires_at()
+        self._save(connection)
 
     def rotate(self, connection_id: str, api_key: str, api_secret: str) -> Connection:
         """Validate the new credentials before swapping them in (FR-45014)."""
@@ -168,8 +290,9 @@ class ConnectionManager:
 
     def set_watchlist(self, connection_id: str, instruments: list[str]) -> Connection:
         connection = self.get(connection_id)
+        prefixes = tuple(f"{m}:" for m in markets_of(connection.venue))
         for instrument_id in instruments:
-            if not instrument_id.startswith(f"{connection.venue}:"):
+            if not instrument_id.startswith(prefixes):
                 raise ValidationError(
                     "WATCHLIST_INVALID", [{"field": "instruments", "message": instrument_id}]
                 )
@@ -197,7 +320,7 @@ class ConnectionManager:
         venue = instrument_id.split(":", 1)[0]
         for connection in self.connections.values():
             adapter = self.adapters.get(connection.connection_id)
-            if connection.venue == venue and adapter is not None:
+            if venue in markets_of(connection.venue) and adapter is not None and adapter.is_ready():
                 return adapter
         return None
 
@@ -206,6 +329,8 @@ class ConnectionManager:
         if connection is None or connection.status is ConnectionStatus.DISABLED:
             return
         status = ConnectionStatus.CONNECTED if ok else ConnectionStatus.DEGRADED
+        if not ok and error and "LOGIN_REQUIRED" in error:
+            status = ConnectionStatus.LOGIN_REQUIRED
         if status is not connection.status or error != connection.last_error:
             connection.status, connection.last_error = status, error
             self._save(connection)
@@ -214,13 +339,27 @@ class ConnectionManager:
 
     def _build(self, connection: Connection, key: str | None, secret: str | None) -> VenueAdapter:
         http = self._http_factory(connection.venue) if self._http_factory else None
-        return ADAPTERS[connection.venue](
-            self._platform.clock,
-            api_key=key,
-            api_secret=secret,
-            environment=connection.environment,
-            http=http,
-        )
+        options: dict[str, Any] = {}
+        if connection.venue == "FYERS":
+            from jdquant.markets.india import Product
+
+            try:
+                options["product"] = Product(connection.settings.get("product", Product.CNC.value))
+            except ValueError:
+                raise ValidationError(
+                    "PRODUCT_INVALID", [{"field": "product", "message": "CNC or INTRADAY"}]
+                ) from None
+        try:
+            return ADAPTERS[connection.venue](
+                self._platform.clock,
+                api_key=key,
+                api_secret=secret,
+                environment=connection.environment,
+                http=http,
+                **options,
+            )
+        except VenueError as exc:
+            raise ValidationError(exc.code, [{"field": "environment", "message": exc.message}]) from None
 
     def _verify(self, connection: Connection, adapter: VenueAdapter) -> None:
         connection.last_tested_at = self._platform.clock.now()

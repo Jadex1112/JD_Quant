@@ -299,6 +299,7 @@ class AccountOut(BaseModel):
     mode: str
     base_currency: str
     status: str
+    markets: list[str]  # instrument venues this account can trade
 
 
 class AccountStatusIn(BaseModel):
@@ -357,6 +358,16 @@ class ConnectionIn(BaseModel):
     api_key: str | None = None
     api_secret: str | None = None
     base_currency: str = "USD"
+    settings: dict[str, Any] = Field(default_factory=dict)
+
+
+class PinIn(BaseModel):
+    pin: str | None = Field(default=None, pattern=r"^\d{4,6}$")
+
+
+class BrokerLoginOut(BaseModel):
+    login_url: str
+    redirect_uri: str
 
 
 class CredentialsIn(BaseModel):
@@ -381,3 +392,7 @@ class ConnectionOut(BaseModel):
     clock_offset_ms: float | None
     instrument_count: int
     watchlist: list[str]
+    settings: dict[str, Any]
+    requires_login: bool
+    session_expires_at: datetime | None
+    markets: list[str]

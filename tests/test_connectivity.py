@@ -3,10 +3,11 @@
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
+from urllib.parse import parse_qsl, urlsplit
 
 import pytest
 from conftest import T0, advance
-from fake_venues import FakeAlpaca, FakeBinance
+from fake_venues import FakeAlpaca, FakeBinance, FakeFyers
 
 from jdquant.connectivity.base import Environment
 from jdquant.connectivity.connections import ConnectionManager
@@ -51,6 +52,8 @@ class Harness:
     def venue_fill(self, order, qty, price):
         if self.name == "binance":
             self.fake.trade("BTCUSDT", price, qty)
+        elif self.name == "fyers":
+            self.fake.fill(order.venue_order_id, qty, price)
         else:
             self.fake.fill(order.venue_order_id, qty, price)
 
@@ -68,6 +71,16 @@ def _harness(name: str) -> Harness:
             "0.1",
             "49000",
         )
+    elif name == "fyers":
+        fake = FakeFyers(now=T0)
+        creds, venue, env, inst, qty, price = (
+            (fake.app_id, fake.secret),
+            "FYERS",
+            Environment.PRODUCTION,
+            "NSE:SBIN-EQ",
+            "10",
+            "790",
+        )
     else:
         fake = FakeAlpaca()
         creds, venue, env, inst, qty, price = (
@@ -83,6 +96,10 @@ def _harness(name: str) -> Harness:
     conn = manager.create(
         name=name, venue=venue, environment=env, actor="t", api_key=creds[0], api_secret=creds[1]
     )
+    if name == "fyers":
+        url = manager.begin_login(conn.connection_id, "http://localhost/cb")
+        state = dict(parse_qsl(urlsplit(url).query))["state"]
+        conn = manager.complete_login(state, fake.auth_code)
     manager.set_watchlist(conn.connection_id, [inst])
     runner = DeploymentRunner(platform, manager.data_source_for)
     poller = VenuePoller(platform, manager, runner)
@@ -96,14 +113,14 @@ def _box():
     return SecretBox(Fernet.generate_key())
 
 
-@pytest.fixture(params=["binance", "alpaca"])
+@pytest.fixture(params=["binance", "alpaca", "fyers"])
 def venue(request) -> Harness:
     return _harness(request.param)
 
 
 def test_connection_syncs_instruments_and_prices(venue):
     instrument = venue.platform.instruments.get(venue.instrument_id)
-    assert instrument.tick_size == Decimal("0.01")
+    assert instrument.tick_size == (Decimal("0.05") if venue.name == "fyers" else Decimal("0.01"))
     assert venue.platform.market.reference_price(venue.instrument_id) is not None
     assert venue.platform.trading.get_account(venue.account_id).mode.value == "LIVE"
     assert venue.manager.adapter_for_account(venue.account_id).fetch_balances()
@@ -131,7 +148,7 @@ def test_market_order_fills_immediately(venue):
 
 
 def test_venue_rejection_is_normalized(venue):
-    order = venue.order(qty="1000" if venue.name == "alpaca" else "3")
+    order = venue.order(qty={"alpaca": "1000", "binance": "3", "fyers": "200"}[venue.name])
     assert order.status is S.REJECTED and order.reject_code == "INSUFFICIENT_BALANCE"
 
 
@@ -151,7 +168,10 @@ def test_native_modify_moves_the_order(venue):
     new_price = str(Decimal(venue.resting_price) - 1)
     venue.platform.oms.modify(order.order_id, limit_price=Decimal(new_price))
     assert order.status is S.OPEN and order.limit_price == Decimal(new_price)
-    assert order.client_order_id != old_client_id
+    if venue.name == "fyers":  # Fyers modifies in place under the same order id
+        assert order.client_order_id == old_client_id
+    else:
+        assert order.client_order_id != old_client_id
     venue.venue_fill(order, venue.qty, new_price)
     venue.poller.tick()
     assert order.status is S.FILLED

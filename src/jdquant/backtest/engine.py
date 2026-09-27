@@ -108,7 +108,7 @@ def reproducibility_hash(config: BacktestConfig, strategy_cls: type[Strategy]) -
         "strategy": f"{strategy_cls.__module__}.{strategy_cls.__qualname__}@{strategy_cls.version}",
         "parameters": {k: str(v) for k, v in sorted(config.parameters.items())},
         "capital": str(config.initial_capital),
-        "fees": [str(config.fees.maker_bps), str(config.fees.taker_bps)],
+        "fees": config.fees.fingerprint(),
         "slippage": str(config.slippage_bps),
         "risk": [(r.limit_type.value, str(r.threshold)) for r in config.risk_limits],
         "seed": config.seed,

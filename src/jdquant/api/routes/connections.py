@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import os
+from urllib.parse import urlencode
+
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import RedirectResponse
 
 from jdquant.api.deps import ctx, locked, require
-from jdquant.api.schemas import ConnectionIn, ConnectionOut, CredentialsIn, WatchlistIn
+from jdquant.api.schemas import BrokerLoginOut, ConnectionIn, ConnectionOut, CredentialsIn, PinIn, WatchlistIn
 from jdquant.connectivity.base import Environment
-from jdquant.connectivity.connections import Connection, ConnectionManager
-from jdquant.core.errors import ValidationError
+from jdquant.connectivity.connections import ADAPTERS, Connection, ConnectionManager, markets_of
+from jdquant.core.errors import PlatformError, ValidationError
 from jdquant.security.identity import Principal
 
 router = APIRouter(prefix="/api/v1", tags=["connections"])
@@ -32,7 +36,20 @@ def connection_out(c: Connection) -> ConnectionOut:
         clock_offset_ms=c.clock_offset_ms,
         instrument_count=c.instrument_count,
         watchlist=c.watchlist,
+        settings=c.settings,
+        requires_login=bool(getattr(ADAPTERS.get(c.venue), "requires_login", False)),
+        session_expires_at=c.session_expires_at,
+        markets=list(markets_of(c.venue)),
     )
+
+
+CALLBACK_PATH = "/api/v1/connections/oauth/callback"
+
+
+def redirect_uri(request: Request) -> str:
+    """Where the broker sends the user back; must match the redirect URL registered with the broker app."""
+    base = os.environ.get("JDQ_PUBLIC_URL") or str(request.base_url)
+    return base.rstrip("/") + CALLBACK_PATH
 
 
 def _audit(request: Request, principal: Principal, action: str, target: str, **data) -> None:
@@ -65,6 +82,7 @@ def create_connection(
         api_key=body.api_key or None,
         api_secret=body.api_secret or None,
         base_currency=body.base_currency,
+        settings=body.settings,
     )
     _audit(
         request,
@@ -129,3 +147,51 @@ def balances(account_id: str, request: Request, principal: Principal = Depends(r
         {"asset": b.asset, "free": str(b.free), "locked": str(b.locked), "total": str(b.total)}
         for b in adapter.fetch_balances()
     ]
+
+
+@router.post("/connections/{connection_id}:login", response_model=BrokerLoginOut)
+def begin_login(
+    connection_id: str, request: Request, principal: Principal = Depends(require("connection:update"))
+):
+    uri = redirect_uri(request)
+    url = _manager(request).begin_login(connection_id, uri)
+    _audit(request, principal, "connection.login.start", connection_id)
+    return BrokerLoginOut(login_url=url, redirect_uri=uri)
+
+
+@router.get(CALLBACK_PATH.removeprefix("/api/v1"), include_in_schema=False)
+def login_callback(request: Request, state: str = "", auth_code: str = "", s: str = "") -> RedirectResponse:
+    """The broker redirects the browser here. The one-time `state` proves which login this completes;
+    session cookies are not sent on this cross-site redirect, so they are not relied on."""
+    c = ctx(request)
+    try:
+        if s and s != "ok" or not auth_code:
+            raise PlatformError("LOGIN_FAILED", "the broker did not return an authorization code")
+        with c.platform.lock:
+            connection = _manager(request).complete_login(state, auth_code)
+    except PlatformError as exc:
+        c.audit.record(actor="broker-login", action="connection.login", category="AUTHENTICATION",
+                       outcome="FAILURE", data={"code": exc.code})  # fmt: skip
+        query = urlencode({"login": "failed", "reason": exc.message})
+        return RedirectResponse(f"/connections?{query}", status_code=303)
+    c.audit.record(
+        actor=connection.created_by,
+        action="connection.login",
+        category="AUTHENTICATION",
+        target=connection.connection_id,
+    )
+    return RedirectResponse("/connections?login=ok", status_code=303)
+
+
+@router.put("/connections/{connection_id}/pin", response_model=ConnectionOut)
+@locked
+def set_pin(
+    connection_id: str,
+    body: PinIn,
+    request: Request,
+    principal: Principal = Depends(require("connection:rotate")),
+):
+    """Store the broker PIN (encrypted) so expired sessions renew without a manual sign-in."""
+    connection = _manager(request).set_pin(connection_id, body.pin)
+    _audit(request, principal, "connection.pin." + ("set" if body.pin else "clear"), connection_id)
+    return connection_out(connection)

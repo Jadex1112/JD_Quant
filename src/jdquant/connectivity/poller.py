@@ -61,6 +61,9 @@ class VenuePoller:
 
         for connection_id, adapter in list(self._connections.adapters.items()):
             connection = self._connections.connections[connection_id]
+            if not adapter.is_ready():
+                self._connections.mark(connection_id, False, "LOGIN_REQUIRED: sign in to the broker again")
+                continue
             orders = [o for o in working if o.account_id == connection.account_id]
             try:
                 if orders:

@@ -28,6 +28,16 @@ class FeeSchedule:
     maker_bps: Decimal = Decimal(10)
     taker_bps: Decimal = Decimal(10)
 
+    def fee(
+        self, instrument: Instrument, side: Side, quantity: Decimal, price: Decimal, liquidity: Liquidity
+    ) -> Decimal:
+        bps = self.maker_bps if liquidity is Liquidity.MAKER else self.taker_bps
+        return instrument.notional(quantity, price) * bps / BPS
+
+    def fingerprint(self) -> list[str]:
+        """Stable description for backtest reproducibility hashes."""
+        return [str(self.maker_bps), str(self.taker_bps)]
+
 
 class SimulatedVenue:
     def __init__(
@@ -191,8 +201,7 @@ class SimulatedVenue:
     def _fill(self, order: Order, price: Decimal, liquidity: Liquidity) -> None:
         instrument = self._instruments.get(order.instrument_id)
         quantity = order.remaining_quantity
-        bps = self.fees.maker_bps if liquidity is Liquidity.MAKER else self.fees.taker_bps
-        fee = instrument.notional(quantity, price) * bps / BPS
+        fee = self.fees.fee(instrument, order.side, quantity, price, liquidity)
         self._trade_seq += 1
         self._emit(
             ReportType.FILL,

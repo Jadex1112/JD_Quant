@@ -94,6 +94,8 @@ class VenueAdapter(ABC):
 
     venue: str
     supports_replace: bool = False
+    markets: tuple[str, ...] = ()  # instrument venues this adapter trades when they differ from `venue`
+    requires_login: bool = False  # interactive broker login (OAuth) instead of static API keys
 
     def __init__(self, clock: Clock, *, http: httpx.Client | None = None, timeout: float = 10.0):
         self._clock = clock
@@ -188,6 +190,10 @@ class VenueAdapter(ABC):
     @abstractmethod
     def poll(self, orders: list[Order]) -> None:
         """Emit reports for any change in the given working orders (fills, cancels, expiries)."""
+
+    def is_ready(self) -> bool:
+        """False while the adapter cannot make authenticated calls (e.g. awaiting a broker login)."""
+        return True
 
     def replace(self, order: Order, quantity: Decimal, limit_price: Decimal) -> None:
         raise VenueError("REPLACE_UNSUPPORTED", f"{self.venue} does not support native replace")

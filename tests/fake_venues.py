@@ -378,3 +378,150 @@ class FakeAlpaca:
 
 def utc(ms: int) -> datetime:
     return datetime.fromtimestamp(ms / 1000, tz=UTC)
+
+
+def fake_jwt(exp: datetime) -> str:
+    import base64
+
+    def part(obj) -> str:
+        return base64.urlsafe_b64encode(json.dumps(obj).encode()).decode().rstrip("=")
+
+    return f"{part({'alg': 'HS256'})}.{part({'exp': int(exp.timestamp())})}.sig"
+
+
+SYMBOL_MASTER_CSV = (
+    "10100000003045,STATE BANK OF INDIA,0,1,0.05,INE062A01020,0915-1530|1815-1915:,1691157600,,"
+    "NSE:SBIN-EQ,10,10,3045,SBIN,3045,-1.0,XX,10100000003045,None,None,None\n"
+    "10100000002885,RELIANCE INDUSTRIES LTD,0,1,0.1,INE002A01018,0915-1530|1815-1915:,1691157600,,"
+    "NSE:RELIANCE-EQ,10,10,2885,RELIANCE,2885,-1.0,XX,10100000002885,None,None,None\n"
+    "101000000026000,NIFTY50-INDEX,10,1,0.05,,0915-1530|1815-1915:,1691157600,,"
+    "NSE:NIFTY50-INDEX,10,10,26000,NIFTY50,26000,-1.0,XX,101000000026000,None,None,None\n"
+)
+
+
+class FakeFyers:
+    """Fyers API v3 (trading + data + public symbol master) for NSE equities."""
+
+    def __init__(self, *, app_id: str = "XA1234-100", secret: str = "fsecret", now: datetime | None = None):
+        self.app_id, self.secret = app_id, secret
+        self.now = now or datetime(2026, 1, 5, 9, 0, tzinfo=UTC)
+        self.auth_code = "good-code"
+        self.pin = "1234"
+        self.token = fake_jwt(self.now.replace(hour=23))
+        self.refresh_token = "refresh-1"
+        self.quotes = {"NSE:SBIN-EQ": (Decimal("799.9"), Decimal("800.1"))}
+        self.cash = Decimal(100_000)
+        self.book: dict[str, dict] = {}
+        self._ids = itertools.count(26010500001)
+        self.fail_next: str | None = None
+        self.requests: list[httpx.Request] = []
+
+    def client(self) -> httpx.Client:
+        return httpx.Client(transport=httpx.MockTransport(self.handle))
+
+    def app_hash(self) -> str:
+        return hashlib.sha256(f"{self.app_id}:{self.secret}".encode()).hexdigest()
+
+    def fill(self, venue_id: str, qty: str, price: str) -> None:
+        o = self.book[venue_id]
+        q, p = Decimal(qty), Decimal(price)
+        prev = Decimal(str(o["filledQty"]))
+        avg = Decimal(str(o["tradedPrice"]))
+        total = prev + q
+        o["tradedPrice"] = float((avg * prev + p * q) / total)
+        o["filledQty"] = int(total)
+        o["remainingQuantity"] = int(Decimal(o["qty"]) - total)
+        o["status"] = 2 if total >= o["qty"] else 6
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        url = urlsplit(str(request.url))
+        path = url.path
+        body = json.loads(request.content) if request.content else {}
+        if url.netloc == "public.fyers.in":
+            return httpx.Response(200, text=SYMBOL_MASTER_CSV)
+        if path == "/api/v3/validate-authcode":
+            if body.get("appIdHash") != self.app_hash() or body.get("code") != self.auth_code:
+                return _json(400, {"s": "error", "code": -413, "message": "invalid auth code"})
+            return _json(200, {"s": "ok", "access_token": self.token, "refresh_token": self.refresh_token})
+        if path == "/api/v3/validate-refresh-token":
+            if body.get("refresh_token") != self.refresh_token or body.get("pin") != self.pin:
+                return _json(400, {"s": "error", "code": -501, "message": "invalid pin"})
+            self.token = fake_jwt(self.now.replace(hour=23, minute=59))
+            return _json(200, {"s": "ok", "access_token": self.token})
+        if request.headers.get("Authorization") != f"{self.app_id}:{self.token}":
+            return _json(401, {"s": "error", "code": -16, "message": "Could not authenticate the user"})
+        if self.fail_next == "timeout":
+            self.fail_next = None
+            raise httpx.ReadTimeout("simulated timeout", request=request)
+        params = dict(parse_qsl(url.query))
+        match (request.method, path):
+            case ("GET", "/api/v3/profile"):
+                return _json(200, {"s": "ok", "data": {"name": "Test Trader", "fy_id": "XY01234"}})
+            case ("GET", "/api/v3/funds"):
+                return _json(200, {"s": "ok", "fund_limit": [
+                    {"id": 1, "title": "Total Balance", "equityAmount": float(self.cash),
+                     "commodityAmount": 0},
+                    {"id": 10, "title": "Available Balance", "equityAmount": float(self.cash),
+                     "commodityAmount": 0},
+                ]})  # fmt: skip
+            case ("GET", "/data/quotes"):
+                d = []
+                for sym in params["symbols"].split(","):
+                    if sym in self.quotes:
+                        bid, ask = self.quotes[sym]
+                        v = {
+                            "bid": float(bid),
+                            "ask": float(ask),
+                            "lp": float(ask),
+                            "tt": int(self.now.timestamp()),
+                        }
+                        d.append({"n": sym, "s": "ok", "v": v})
+                return _json(200, {"s": "ok", "d": d})
+            case ("GET", "/data/history"):
+                step = 86400 if params["resolution"] == "D" else int(params["resolution"]) * 60
+                start, end = int(params["range_from"]), int(params["range_to"])
+                start -= start % step
+                candles = [[t, 800, 805, 795, 801, 1000] for t in range(start, end, step)]
+                return _json(200, {"s": "ok", "candles": candles})
+            case ("POST", "/api/v3/orders/sync"):
+                return self._place(body)
+            case ("PATCH", "/api/v3/orders/sync"):
+                o = self.book.get(body.get("id", ""))
+                if o is None or o["status"] != 6:
+                    return _json(400, {"s": "error", "code": -52, "message": "Order not pending"})
+                o["qty"], o["limitPrice"] = body["qty"], body["limitPrice"]
+                return _json(
+                    200, {"s": "ok", "code": 1102, "message": "Successfully modified order", "id": o["id"]}
+                )
+            case ("DELETE", "/api/v3/orders/sync"):
+                o = self.book.get(body.get("id", ""))
+                if o is None or o["status"] != 6:
+                    return _json(400, {"s": "error", "code": -52, "message": "Order not pending"})
+                o["status"] = 1
+                return _json(
+                    200, {"s": "ok", "code": 1103, "message": "Successfully cancelled order", "id": o["id"]}
+                )
+            case ("GET", "/api/v3/orders"):
+                return _json(200, {"s": "ok", "orderBook": list(self.book.values())})
+        return _json(404, {"s": "error", "code": -1, "message": f"no route {request.method} {path}"})
+
+    def _place(self, body: dict) -> httpx.Response:
+        bid, ask = self.quotes.get(body["symbol"], (None, None))
+        if bid is None:
+            return _json(400, {"s": "error", "code": -50, "message": "Invalid symbol"})
+        price = Decimal(str(body["limitPrice"])) if body["type"] == 1 else ask
+        if body["side"] == 1 and price * body["qty"] > self.cash:
+            return _json(400, {"s": "error", "code": -99, "message": "RMS: Insufficient funds"})
+        venue_id = str(next(self._ids))
+        self.book[venue_id] = {
+            "id": venue_id, "symbol": body["symbol"], "qty": body["qty"], "side": body["side"],
+            "type": body["type"], "limitPrice": body["limitPrice"], "productType": body["productType"],
+            "filledQty": 0, "remainingQuantity": body["qty"], "tradedPrice": 0, "status": 6,
+            "orderTag": body.get("orderTag", ""), "orderDateTime": "05-Jan-2026 14:30:00", "message": "",
+        }  # fmt: skip
+        if body["type"] == 2:
+            self.fill(venue_id, str(body["qty"]), str(ask if body["side"] == 1 else bid))
+        return _json(
+            200, {"s": "ok", "code": 1101, "message": "Order submitted successfully", "id": venue_id}
+        )
