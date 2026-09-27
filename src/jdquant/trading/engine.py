@@ -39,6 +39,12 @@ class TradingAccount:
     status: AccountStatus = AccountStatus.ACTIVE
 
 
+class PlatformMode(StrEnum):
+    NORMAL = "NORMAL"
+    RECOVERING = "RECOVERING"
+    SAFE = "SAFE"
+
+
 class DeploymentState(StrEnum):
     DRAFT = "DRAFT"
     READY = "READY"
@@ -158,6 +164,7 @@ class TradingEngine:
         self.deployments: dict[str, Deployment] = {}
         self.kill_switches: dict[str, KillSwitch] = {}
         self.maintenance_mode = False
+        self.mode = PlatformMode.NORMAL
         bus.subscribe("risk.breach.detected", self._on_risk_breach)
         bus.subscribe("position.updated", self._on_position_updated)
 
@@ -174,7 +181,33 @@ class TradingEngine:
 
     def register_account(self, account: TradingAccount) -> TradingAccount:
         self.accounts[account.account_id] = account
+        self._bus.publish(
+            "account.registered",
+            {"account_id": account.account_id},
+            producer="lte",
+            partition_key=account.account_id,
+        )
         return account
+
+    def restore(
+        self,
+        accounts: list[TradingAccount],
+        deployments: list[Deployment],
+        kill_switches: list[KillSwitch],
+        maintenance_mode: bool,
+    ) -> None:
+        self.accounts.update({a.account_id: a for a in accounts})
+        self.deployments.update({d.deployment_id: d for d in deployments})
+        self.kill_switches.update({k.kill_switch_id: k for k in kill_switches})
+        self.maintenance_mode = maintenance_mode
+
+    def set_mode(self, mode: PlatformMode, reason: str = "") -> None:
+        previous, self.mode = self.mode, mode
+        self._bus.publish(
+            "platform.mode.changed",
+            {"from": previous.value, "to": mode.value, "reason": reason},
+            producer="lte",
+        )
 
     def get_account(self, account_id: str) -> TradingAccount:
         try:
@@ -441,9 +474,13 @@ class TradingEngine:
         account = self.accounts.get(order.account_id)
         if account is None:
             return "ACCOUNT_NOT_FOUND"
+        if self.mode is PlatformMode.RECOVERING:
+            return "PLATFORM_RECOVERING"
         system_reducing = order.source is OrderSource.SYSTEM and order.reduce_only
         if system_reducing:
             return None
+        if self.mode is PlatformMode.SAFE and not order.reduce_only:
+            return "PLATFORM_SAFE_MODE"
         if account.status is not AccountStatus.ACTIVE:
             return "ACCOUNT_NOT_ACTIVE"
         if self.maintenance_mode:

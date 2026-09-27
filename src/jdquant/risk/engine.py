@@ -299,6 +299,7 @@ class RiskEngine:
         if account_id in self.reduce_only_accounts:
             return
         self.reduce_only_accounts.add(account_id)
+        self._publish_state()
         self._bus.publish(
             "risk.breach.detected",
             {
@@ -314,6 +315,47 @@ class RiskEngine:
 
     def release_reduce_only(self, account_id: str) -> None:
         self.reduce_only_accounts.discard(account_id)
+        self._publish_state()
+
+    def set_profiles(self, profiles: list[RiskProfile]) -> None:
+        self.profiles = list(profiles)
+        self._bus.publish("risk.profile.changed", {"count": len(self.profiles)}, producer="rms")
+
+    # ---- persistence & recovery (FR-92002, FR-92004) ----------------------------------------
+
+    def state_snapshot(self) -> dict:
+        return {
+            "day": self._day.isoformat() if self._day else None,
+            "baselines": {k: str(v) for k, v in self._unrealized_baseline.items()},
+            "reduce_only": sorted(self.reduce_only_accounts),
+        }
+
+    def _publish_state(self) -> None:
+        self._bus.publish("risk.state.changed", self.state_snapshot(), producer="rms")
+
+    def rebuild(
+        self,
+        positions: list[tuple[str, str, str, Decimal, Decimal, Decimal]],
+        working: list[Order],
+        realized_today: dict[str, Decimal],
+        state: dict | None,
+    ) -> None:
+        """Restore in-memory pre-trade state after a restart without re-running post-trade actions."""
+        self._positions.clear()
+        for account_id, instrument_id, deployment_id, qty, avg, mult in positions:
+            self._positions[(account_id, instrument_id, deployment_id)] = _PositionState(qty, avg, mult)
+        self._working = {
+            o.order_id: _WorkingOrder(o.account_id, o.instrument_id, o.side, o.remaining_quantity)
+            for o in working
+        }
+        today = self._clock.now().date()
+        if state and state.get("day") == today.isoformat():
+            self._day = today
+            self._unrealized_baseline.update({k: Decimal(v) for k, v in state["baselines"].items()})
+            self.reduce_only_accounts = set(state["reduce_only"])
+            self._realized_today = defaultdict(lambda: ZERO, realized_today)
+        else:
+            self._day = None
 
     def _unrealized(self, account_id: str) -> Decimal:
         total = ZERO
@@ -335,6 +377,7 @@ class RiskEngine:
         for account_id in accounts:
             self._unrealized_baseline[account_id] = self._unrealized(account_id)
         self.reduce_only_accounts.clear()
+        self._publish_state()
 
     # ---- event consumers -------------------------------------------------------------------
 

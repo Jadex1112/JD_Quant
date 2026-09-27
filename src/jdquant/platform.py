@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 from decimal import Decimal
 
 from jdquant.core.clock import Clock, SystemClock
@@ -12,6 +13,9 @@ from jdquant.execution.simulator import FeeSchedule, FillTiming, SimulatedVenue
 from jdquant.marketdata.cache import MarketDataCache
 from jdquant.marketdata.instruments import AssetClass, Instrument, InstrumentRegistry
 from jdquant.oms.manager import OrderManager
+from jdquant.persistence.journal import Journal
+from jdquant.persistence.recovery import RecoveryReport, recover
+from jdquant.persistence.store import Store
 from jdquant.positions.engine import PositionEngine
 from jdquant.risk.engine import LimitType, RiskEngine, RiskLimit, RiskProfile, Scope
 from jdquant.trading.engine import AccountMode, TradingAccount, TradingEngine
@@ -75,9 +79,15 @@ class Platform:
     positions: PositionEngine
     trading: TradingEngine
     oms: OrderManager
+    store: Store | None = None
+    recovery: RecoveryReport | None = None
+    lock: threading.RLock = field(default_factory=threading.RLock)
 
 
-def build_paper_platform(clock: Clock | None = None, *, single_user: bool = True) -> Platform:
+def build_paper_platform(
+    clock: Clock | None = None, *, single_user: bool = True, store: Store | None = None
+) -> Platform:
+    """Assemble the platform; with a store, state is persisted and recovered on startup."""
     clock = clock or SystemClock()
     ids = UuidIds()
     bus = EventBus(clock)
@@ -94,7 +104,12 @@ def build_paper_platform(clock: Clock | None = None, *, single_user: bool = True
     oms = OrderManager(clock, bus, registry, risk, venue, eligibility=trading.check_eligibility, ids=ids)
     venue.set_report_handler(oms.on_execution_report)
     trading.attach_oms(oms)
-    trading.register_account(
-        TradingAccount(PAPER_ACCOUNT_ID, "Paper (main)", "PAPER", AccountMode.PAPER, "USDT")
-    )
-    return Platform(clock, bus, registry, market, risk, venue, positions, trading, oms)
+    platform = Platform(clock, bus, registry, market, risk, venue, positions, trading, oms, store)
+    if store is not None:
+        Journal(store, bus, trading, risk)
+        platform.recovery = recover(platform, store)
+    if PAPER_ACCOUNT_ID not in trading.accounts:
+        trading.register_account(
+            TradingAccount(PAPER_ACCOUNT_ID, "Paper (main)", "PAPER", AccountMode.PAPER, "USDT")
+        )
+    return platform

@@ -63,7 +63,7 @@ class PositionEngine:
     def _on_fill(self, event: Event) -> None:
         self.apply_fill(event.payload["fill"])
 
-    def apply_fill(self, fill: Fill) -> Decimal:
+    def apply_fill(self, fill: Fill, *, publish: bool = True) -> Decimal:
         """Apply a fill and return the realized P&L it produced (FR-28001, FR-28004, FR-28006)."""
         position = self.get_or_create(fill.account_id, fill.instrument_id, fill.deployment_id)
         signed = fill.quantity * fill.side.sign
@@ -86,6 +86,8 @@ class PositionEngine:
             position.lots.clear()
             position.opened_at = None
 
+        if not publish:
+            return realized
         self._bus.publish(
             "position.updated",
             {

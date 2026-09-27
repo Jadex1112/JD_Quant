@@ -43,16 +43,21 @@ class DeadLetter:
 
 
 class EventBus:
-    """Synchronous bus: ordered per partition, handler failures isolated into a dead-letter list."""
+    """Synchronous bus, ordered per partition.
+
+    Critical subscribers (persistence, audit) run first and their failures abort the publishing
+    operation; failures of ordinary subscribers are isolated into a dead-letter list.
+    """
 
     def __init__(self, clock: Clock):
         self._clock = clock
+        self._critical: list[tuple[str, Handler]] = []
         self._subscriptions: list[tuple[str, Handler]] = []
         self._sequences: dict[str, int] = defaultdict(int)
         self.dead_letters: list[DeadLetter] = []
 
-    def subscribe(self, pattern: str, handler: Handler) -> None:
-        self._subscriptions.append((pattern, handler))
+    def subscribe(self, pattern: str, handler: Handler, *, critical: bool = False) -> None:
+        (self._critical if critical else self._subscriptions).append((pattern, handler))
 
     def publish(
         self,
@@ -75,6 +80,9 @@ class EventBus:
             correlation_id=correlation_id,
             causation_id=causation_id,
         )
+        for pattern, handler in list(self._critical):
+            if fnmatch.fnmatchcase(event_type, pattern):
+                handler(event)
         for pattern, handler in list(self._subscriptions):
             if fnmatch.fnmatchcase(event_type, pattern):
                 try:

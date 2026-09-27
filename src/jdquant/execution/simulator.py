@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
@@ -39,6 +40,7 @@ class SimulatedVenue:
         fill_timing: FillTiming = FillTiming.IMMEDIATE,
         fees: FeeSchedule | None = None,
         slippage_bps: Decimal = ZERO,
+        session_id: str | None = None,
     ):
         self.venue = venue
         self._clock = clock
@@ -52,6 +54,8 @@ class SimulatedVenue:
         self._pending_market: dict[str, Order] = {}
         self._known: set[str] = set()
         self._trade_seq = 0
+        # Trade ids must stay unique across restarts, because fills are de-duplicated by them.
+        self._session = session_id or uuid.uuid4().hex[:12]
 
     def set_report_handler(self, handler: Callable[[ExecutionReport], None]) -> None:
         self._handler = handler
@@ -95,6 +99,14 @@ class SimulatedVenue:
             self._emit(ReportType.CANCEL_REJECT, order, reason="ORDER_NOT_WORKING")
         else:
             self._emit(ReportType.CANCELED, order)
+
+    def restore_working(self, order: Order) -> None:
+        """Rebuild the simulated book from persisted working orders after a restart."""
+        self._known.add(order.client_order_id)
+        if order.order_type is OrderType.LIMIT:
+            self._resting[order.client_order_id] = order
+        elif order.order_type is OrderType.MARKET and self.fill_timing is FillTiming.NEXT_BAR:
+            self._pending_market[order.client_order_id] = order
 
     def query(self, order: Order) -> None:
         if order.client_order_id not in self._known:
@@ -171,7 +183,7 @@ class SimulatedVenue:
             fee=fee,
             fee_asset=instrument.quote_asset,
             liquidity=liquidity,
-            venue_trade_id=f"SIMT-{self._trade_seq:010d}",
+            venue_trade_id=f"SIMT-{self._session}-{self._trade_seq:010d}",
         )
 
     def _emit(self, report_type: ReportType, order: Order, **fields) -> None:

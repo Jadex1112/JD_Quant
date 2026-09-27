@@ -156,6 +156,7 @@ class OrderManager:
             submitter=request.submitter,
             created_at=self._clock.now(),
             signal_id=request.signal_id,
+            idempotency_key=request.idempotency_key,
             tags=dict(request.tags),
         )
         self._orders[order.order_id] = order
@@ -335,6 +336,7 @@ class OrderManager:
             venue_trade_id=report.venue_trade_id,
             exchange_ts=report.exchange_ts,
             is_simulated=report.is_simulated,
+            venue=report.venue,
         )
         self.fills.append(fill)
 
@@ -385,6 +387,48 @@ class OrderManager:
                 self._router.query(order)
                 timed_out.append(order)
         return timed_out
+
+    # ---- recovery (FR-51002) ----------------------------------------------------------------
+
+    def restore(self, orders: Iterable[Order], fills: Iterable[Fill]) -> None:
+        for order in orders:
+            self._orders[order.order_id] = order
+            self._by_client_id[order.client_order_id] = order
+            if order.idempotency_key:
+                self._idempotency[(order.submitter, order.idempotency_key)] = (
+                    order.order_id,
+                    order.created_at,
+                )
+        for fill in fills:
+            self._fill_keys.add((fill.venue, fill.instrument_id, fill.venue_trade_id))
+            self.fills.append(fill)
+
+    def resolve_in_flight(self) -> list[str]:
+        """Settle orders whose last persisted state was mid-flight when the platform stopped."""
+        actions = []
+        for order in list(self._orders.values()):
+            match order.status:
+                case S.CREATED:
+                    self._reject(order, "RECOVERY", "platform restarted before validation")
+                case S.PENDING_RISK:
+                    order.reject_code, order.reject_reason = (
+                        "RECOVERY",
+                        "platform restarted before risk decision",
+                    )
+                    self._transition(order, S.RISK_REJECTED, "RECOVERY")
+                case S.PENDING_SUBMIT:
+                    self._transition(order, S.CANCELED, "not sent before restart")
+                case S.SUBMITTED:
+                    self._transition(order, S.UNKNOWN, "unacknowledged at restart")
+                    self._router.query(order)
+                case S.UNKNOWN:
+                    self._router.query(order)
+                case S.PENDING_CANCEL:
+                    self._router.cancel(order)
+                case _:
+                    continue
+            actions.append(f"{order.order_id}: {order.status.value}")
+        return actions
 
     # ---- queries ----------------------------------------------------------------------------
 

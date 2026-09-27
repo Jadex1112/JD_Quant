@@ -148,6 +148,7 @@ def run_backtest(config: BacktestConfig) -> BacktestResult:
         fill_timing=FillTiming.NEXT_BAR,
         fees=config.fees,
         slippage_bps=config.slippage_bps,
+        session_id="backtest",
     )
     positions = PositionEngine(bus, registry)
     trading = TradingEngine(clock, bus, positions, ids=ids, single_user=True)

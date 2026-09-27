@@ -134,6 +134,7 @@ class Order:
     submitter: str
     created_at: datetime
     signal_id: str | None = None
+    idempotency_key: str | None = None
     tags: dict[str, str] = field(default_factory=dict)
     status: OrderStatus = OrderStatus.CREATED
     filled_quantity: Decimal = ZERO
@@ -185,6 +186,7 @@ class Fill:
     venue_trade_id: str
     exchange_ts: datetime
     is_simulated: bool = False
+    venue: str = ""
 
 
 class ReportType(StrEnum):
