@@ -345,3 +345,39 @@ class RiskProfileIO(BaseModel):
 class OrderModifyIn(BaseModel):
     quantity: Dec | None = None
     limit_price: Dec | None = None
+
+
+# ---- connections ----------------------------------------------------------------------------------
+
+
+class ConnectionIn(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    venue: str
+    environment: str = "TESTNET"
+    api_key: str | None = None
+    api_secret: str | None = None
+    base_currency: str = "USD"
+
+
+class CredentialsIn(BaseModel):
+    api_key: str = Field(min_length=1)
+    api_secret: str = Field(min_length=1)
+
+
+class WatchlistIn(BaseModel):
+    instruments: list[str]
+
+
+class ConnectionOut(BaseModel):
+    connection_id: str
+    name: str
+    venue: str
+    environment: str
+    account_id: str | None
+    has_credentials: bool
+    status: str
+    last_error: str | None
+    last_tested_at: datetime | None
+    clock_offset_ms: float | None
+    instrument_count: int
+    watchlist: list[str]

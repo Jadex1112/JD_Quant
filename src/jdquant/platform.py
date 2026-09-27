@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
 
+from jdquant.connectivity.router import AccountRouter
 from jdquant.core.clock import Clock, SystemClock
 from jdquant.core.events import EventBus
 from jdquant.core.ids import UuidIds
@@ -79,13 +81,18 @@ class Platform:
     positions: PositionEngine
     trading: TradingEngine
     oms: OrderManager
+    router: AccountRouter | None = None
     store: Store | None = None
     recovery: RecoveryReport | None = None
     lock: threading.RLock = field(default_factory=threading.RLock)
 
 
 def build_paper_platform(
-    clock: Clock | None = None, *, single_user: bool = True, store: Store | None = None
+    clock: Clock | None = None,
+    *,
+    single_user: bool = True,
+    store: Store | None = None,
+    before_recovery: Callable[[Platform], None] | None = None,
 ) -> Platform:
     """Assemble the platform; with a store, state is persisted and recovered on startup."""
     clock = clock or SystemClock()
@@ -101,12 +108,16 @@ def build_paper_platform(
     )
     positions = PositionEngine(bus, registry)
     trading = TradingEngine(clock, bus, positions, ids=ids, single_user=single_user)
-    oms = OrderManager(clock, bus, registry, risk, venue, eligibility=trading.check_eligibility, ids=ids)
+    router = AccountRouter(venue)
+    oms = OrderManager(clock, bus, registry, risk, router, eligibility=trading.check_eligibility, ids=ids)
     venue.set_report_handler(oms.on_execution_report)
     trading.attach_oms(oms)
-    platform = Platform(clock, bus, registry, market, risk, venue, positions, trading, oms, store)
+    platform = Platform(clock, bus, registry, market, risk, venue, positions, trading, oms, router, store)
     if store is not None:
         Journal(store, bus, trading, risk)
+    if before_recovery is not None:
+        before_recovery(platform)  # e.g. attach live venue adapters so in-flight orders reach them
+    if store is not None:
         platform.recovery = recover(platform, store)
     if PAPER_ACCOUNT_ID not in trading.accounts:
         trading.register_account(

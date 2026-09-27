@@ -93,9 +93,10 @@ def push_quote(
     p.instruments.get(body.instrument_id)
     if body.bid_price >= body.ask_price:
         raise ValidationError("QUOTE_INVALID", [{"field": "ask_price", "message": "must exceed bid_price"}])
-    p.market.on_quote(
-        Quote(body.instrument_id, p.clock.now(), body.bid_price, body.bid_size, body.ask_price, body.ask_size)
+    quote = Quote(
+        body.instrument_id, p.clock.now(), body.bid_price, body.bid_size, body.ask_price, body.ask_size
     )
+    ctx(request).services["poller"].on_quote(quote)
 
 
 # ---- accounts ----------------------------------------------------------------------------------
@@ -139,6 +140,7 @@ def submit_order(
 ):
     p = ctx(request).platform
     p.trading.get_account(body.account_id)
+    ctx(request).services["poller"].refresh_quote(body.instrument_id)
     order = p.oms.submit(
         OrderRequest(
             account_id=body.account_id,

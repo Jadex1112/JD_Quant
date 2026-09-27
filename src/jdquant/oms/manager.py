@@ -314,7 +314,9 @@ class OrderManager:
                 raise PlatformError(code or "RISK_REJECTED", "modification rejected by pre-trade risk")
 
         order.pending_quantity, order.pending_limit_price = new_qty, new_price
-        if getattr(self._router, "supports_replace", False):
+        can_replace = getattr(self._router, "can_replace", None)
+        native = can_replace(order) if can_replace else getattr(self._router, "supports_replace", False)
+        if native:
             order.status_before_cancel = order.status
             self._transition(order, S.PENDING_REPLACE)
             self._router.replace(order, new_qty, new_price)

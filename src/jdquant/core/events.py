@@ -59,6 +59,10 @@ class EventBus:
     def subscribe(self, pattern: str, handler: Handler, *, critical: bool = False) -> None:
         (self._critical if critical else self._subscriptions).append((pattern, handler))
 
+    def unsubscribe(self, handler: Handler) -> None:
+        self._critical = [(p, h) for p, h in self._critical if h != handler]
+        self._subscriptions = [(p, h) for p, h in self._subscriptions if h != handler]
+
     def publish(
         self,
         event_type: str,

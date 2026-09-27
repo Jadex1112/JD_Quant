@@ -53,6 +53,7 @@ class StrategyHost:
             history=history,
         )
         self.strategy = strategy_cls(self.ctx)
+        self._bus = bus
         bus.subscribe("order.fill", self._on_fill)
         bus.subscribe("order.state.changed", self._on_order_state)
         self._invoke(self.strategy.on_init)
@@ -67,6 +68,8 @@ class StrategyHost:
 
     def stop(self) -> None:
         self._invoke(self.strategy.on_stop)
+        self._bus.unsubscribe(self._on_fill)
+        self._bus.unsubscribe(self._on_order_state)
 
     def _on_fill(self, event: Event) -> None:
         fill = event.payload["fill"]

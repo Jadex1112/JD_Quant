@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -10,7 +11,7 @@ from fastapi.responses import JSONResponse
 from jdquant import __version__
 from jdquant.api.context import AppContext, Settings, build_context
 from jdquant.api.deps import Forbidden, Unauthenticated
-from jdquant.api.routes import admin, auth, research, trading
+from jdquant.api.routes import admin, auth, connections, research, trading
 from jdquant.core.errors import NotFoundError, PlatformError, ValidationError
 from jdquant.platform import Platform
 
@@ -52,7 +53,16 @@ def create_app(
     context: AppContext | None = None,
 ) -> FastAPI:
     c = context or build_context(settings, platform)
-    app = FastAPI(title="JD Quant AI", version=__version__)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        poller = c.services["poller"]
+        if c.settings.background_polling:
+            poller.start()
+        yield
+        poller.stop()
+
+    app = FastAPI(title="JD Quant AI", version=__version__, lifespan=lifespan)
     app.state.ctx = c
 
     @app.exception_handler(PlatformError)
@@ -92,7 +102,7 @@ def create_app(
             "maintenance_mode": trading_engine.maintenance_mode,
         }
 
-    for module in (auth, admin, trading, research):
+    for module in (auth, admin, trading, research, connections):
         app.include_router(module.router)
     return app
 

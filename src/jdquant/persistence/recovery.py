@@ -78,7 +78,7 @@ def recover(platform, store: Store) -> RecoveryReport:
         store.get("risk", "state"),
     )
 
-    restore_working = getattr(platform.venue, "restore_working", None)
+    restore_working = getattr(platform.router or platform.venue, "restore_working", None)
     acknowledged = (
         OrderStatus.OPEN,
         OrderStatus.PARTIALLY_FILLED,
