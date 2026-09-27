@@ -127,7 +127,20 @@ class MlSignal(Strategy):
             self.ctx.order_target(candle.instrument_id, Decimal(0))
 
 
+def _autopilot() -> type[Strategy]:
+    from jdquant.autopilot.strategy import AutopilotStrategy
+
+    return AutopilotStrategy
+
+
 TEMPLATES: dict[str, type[Strategy]] = {
     cls.name: cls
-    for cls in (MovingAverageCrossover, RsiMeanReversion, BollingerReversion, DonchianBreakout, MlSignal)
+    for cls in (
+        MovingAverageCrossover,
+        RsiMeanReversion,
+        BollingerReversion,
+        DonchianBreakout,
+        MlSignal,
+        _autopilot(),
+    )
 }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -11,6 +12,7 @@ from typing import Any
 from jdquant.ai.copilot import Copilot
 from jdquant.ai.copilot_tools import build_tools
 from jdquant.ai.models import ModelRegistry
+from jdquant.autopilot.engine import Autopilot, make_summarizer
 from jdquant.connectivity.connections import ConnectionManager, HttpFactory
 from jdquant.connectivity.poller import VenuePoller
 from jdquant.persistence.store import Store
@@ -19,6 +21,8 @@ from jdquant.security.audit import AuditLog
 from jdquant.security.identity import IdentityService
 from jdquant.security.secrets import SecretBox, SecretStore, load_master_key
 from jdquant.strategy.runner import DeploymentRunner
+
+log = logging.getLogger(__name__)
 
 
 def _flag(name: str, default: bool) -> bool:
@@ -102,4 +106,30 @@ def build_context(
     services["copilot"] = Copilot(
         store, platform.clock, audit, build_tools(context), client_factory=llm_client_factory
     )
+    services["autopilot"] = Autopilot(
+        platform,
+        store,
+        audit,
+        runner=runner,
+        models=models,
+        venue_candles=_venue_candles(connections),
+        live_ready=lambda account_id: bool(
+            (adapter := connections.adapter_for_account(account_id)) and adapter.is_ready()
+        ),
+        summarizer=make_summarizer(services["copilot"]),
+    )
     return context
+
+
+def _venue_candles(connections: ConnectionManager):
+    def load(instrument, interval_seconds: int, limit: int):
+        source = connections.data_source_for(instrument.instrument_id)
+        if source is None:
+            return None
+        try:
+            return source.fetch_candles(instrument, interval_seconds, limit)
+        except Exception as exc:  # fall back to other sources; the cycle records which one it used
+            log.warning("history for %s unavailable: %s", instrument.instrument_id, exc)
+            return None
+
+    return load

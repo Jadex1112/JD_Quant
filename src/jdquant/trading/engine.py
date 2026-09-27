@@ -305,6 +305,9 @@ class TradingEngine:
 
     def stop(self, deployment_id: str, *, cancel_open: bool = True) -> Deployment:
         deployment = self.get_deployment(deployment_id)
+        if deployment.state in (D.HALTED, D.FAILED):  # already not trading: acknowledge and stop
+            self._transition(deployment, D.STOPPED, f"stopped after {deployment.state.value.lower()}")
+            return deployment
         self._transition(deployment, D.STOPPING)
         if cancel_open:
             self.oms.cancel_all(deployment_id=deployment_id)

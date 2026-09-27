@@ -6,6 +6,7 @@ RESOURCE_ACTIONS: dict[str, tuple[str, ...]] = {
     "account": ("view", "create", "update", "suspend"),
     "connection": ("view", "create", "update", "rotate", "delete"),
     "deployment": ("view", "create", "start", "pause", "stop", "flatten", "approve", "retire"),
+    "autopilot": ("view", "configure", "run", "arm", "disarm"),
     "order": ("view", "create", "modify", "cancel", "cancel_all"),
     "position": ("view", "transfer"),
     "killswitch": ("view", "trigger", "release"),
@@ -39,6 +40,7 @@ PRIVILEGED = frozenset(
         "deployment:approve",
         "audit:export",
         "model:promote",
+        "autopilot:arm",  # lets the autopilot place real orders
     }
 )
 
@@ -72,12 +74,14 @@ ROLES: dict[str, frozenset[str]] = {
     "QUANT_TRADER": frozenset(
         _all("deployment")
         | _all("order")
+        | {"autopilot:view", "autopilot:configure", "autopilot:run", "autopilot:disarm"}
         | {"position:view", "killswitch:view", "killswitch:trigger"}
         | _view("strategy", "portfolio", "marketdata", "backtest", "account", "model", "risk.profile")
         | {"backtest:run", "ai.copilot:use", "ai.copilot:execute_actions", "report:view"}
     ),
     "PORTFOLIO_MANAGER": frozenset(
         _view("portfolio", "deployment", "order", "position", "account", "marketdata", "backtest", "strategy")
+        | _view("autopilot")
         | _all("report")
         | {"ai.copilot:use"}
     ),
@@ -88,6 +92,9 @@ ROLES: dict[str, frozenset[str]] = {
         | {
             "deployment:view",
             "deployment:approve",
+            "autopilot:view",
+            "autopilot:arm",
+            "autopilot:disarm",
             "deployment:pause",
             "deployment:stop",
             "deployment:flatten",
@@ -107,6 +114,7 @@ ROLES: dict[str, frozenset[str]] = {
     "AI_ENGINEER": frozenset(
         _all("model")
         | _all("feature")
+        | {"autopilot:view", "autopilot:run"}
         | _view("marketdata", "strategy", "backtest")
         | {"backtest:run"}
         | {"ai.copilot:use"}
@@ -128,7 +136,7 @@ ROLES: dict[str, frozenset[str]] = {
         | _all("report")
     ),
     "VIEWER": frozenset(
-        _view("portfolio", "position", "order", "marketdata", "deployment") | {"report:view"}
+        _view("portfolio", "position", "order", "marketdata", "deployment", "autopilot") | {"report:view"}
     ),
     "AUDITOR": frozenset({"audit:view", "audit:export", "audit:verify", "settings:view", "role:view"}),
 }

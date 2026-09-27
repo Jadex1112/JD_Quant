@@ -86,6 +86,10 @@ class OrderManager:
 
     # ---- intake -----------------------------------------------------------------------------
 
+    @property
+    def instruments(self) -> InstrumentRegistry:
+        return self._instruments
+
     def submit(self, request: OrderRequest) -> Order:
         existing = self._idempotent_hit(request)
         if existing is not None:

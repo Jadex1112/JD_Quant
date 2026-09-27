@@ -39,6 +39,21 @@ class FeeSchedule:
         return [str(self.maker_bps), str(self.taker_bps)]
 
 
+@dataclass(frozen=True)
+class VenueFees(FeeSchedule):
+    """Per-exchange fee schedules (e.g. Indian charges for NSE), falling back to the flat bps schedule."""
+
+    by_venue: tuple[tuple[str, FeeSchedule], ...] = ()
+
+    def fee(
+        self, instrument: Instrument, side: Side, quantity: Decimal, price: Decimal, liquidity: Liquidity
+    ) -> Decimal:
+        schedule = dict(self.by_venue).get(instrument.venue)
+        if schedule is not None:
+            return schedule.fee(instrument, side, quantity, price, liquidity)
+        return super().fee(instrument, side, quantity, price, liquidity)
+
+
 class SimulatedVenue:
     def __init__(
         self,

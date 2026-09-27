@@ -12,6 +12,7 @@ from typing import Any, ClassVar
 from jdquant.core.clock import Clock
 from jdquant.core.errors import PlatformError, ValidationError
 from jdquant.core.types import Side
+from jdquant.marketdata.instruments import Instrument
 from jdquant.marketdata.records import Candle
 from jdquant.oms.manager import OrderManager
 from jdquant.oms.orders import Fill, Order, OrderRequest, OrderSource, OrderType
@@ -134,6 +135,14 @@ class StrategyContext:
     def position(self, instrument_id: str) -> Decimal:
         pos = self._positions.get_or_create(self.account_id, instrument_id, self.deployment_id)
         return pos.quantity
+
+    def instrument(self, instrument_id: str) -> Instrument:
+        return self._oms.instruments.get(instrument_id)
+
+    def entry_price(self, instrument_id: str) -> Decimal:
+        """Average entry price of this deployment's position (zero when flat)."""
+        position = self._positions.get_or_create(self.account_id, instrument_id, self.deployment_id)
+        return position.average_entry_price
 
     def open_orders(self, instrument_id: str | None = None) -> list[Order]:
         return [
