@@ -1229,6 +1229,7 @@ class Autopilot:
             "last_run_at": self.last_run_at.isoformat() if self.last_run_at else None,
             "next_run_at": (n.isoformat() if (n := self.next_run_at()) else None),
             "paper_account": PAPER_AI_ACCOUNT,
+            "analyst_available": self._analyst is not None,
             "managed": [
                 encode(m) for m in sorted(self.managed.values(), key=lambda m: m.created_at, reverse=True)
             ],

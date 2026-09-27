@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from jdquant import __version__
 from jdquant.api.context import AppContext, Settings, build_context
 from jdquant.api.deps import Forbidden, Unauthenticated
-from jdquant.api.routes import admin, ai, auth, autopilot, connections, research, trading
+from jdquant.api.routes import admin, ai, auth, autopilot, connections, market, research, trading
 from jdquant.core.errors import NotFoundError, PlatformError, ValidationError
 from jdquant.platform import Platform
 
@@ -63,10 +63,15 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         poller, autopilot = c.services["poller"], c.services["autopilot"]
+        feed = c.services.get("demo_feed")
         if c.settings.background_polling:
             poller.start()
             autopilot.start()
+            if feed is not None:
+                feed.start()
         yield
+        if feed is not None:
+            feed.stop()
         autopilot.stop()
         poller.stop()
 
@@ -110,7 +115,7 @@ def create_app(
             "maintenance_mode": trading_engine.maintenance_mode,
         }
 
-    for module in (auth, admin, trading, research, connections, ai, autopilot):
+    for module in (auth, admin, trading, research, connections, ai, autopilot, market):
         app.include_router(module.router)
     _mount_web(app, c.settings.web_dir or WEB_DIST)
     return app

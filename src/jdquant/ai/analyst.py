@@ -153,7 +153,7 @@ def claude_analyst(copilot: Any) -> Analyst:
 
 
 def analyst_from_env(copilot: Any, calls: LlmCallLog | None = None) -> Analyst | None:
-    """JDQ_ANALYST = auto (NVIDIA when NVIDIA_API_KEY is set, else Claude) | nvidia | claude | none."""
+    """JDQ_ANALYST: auto (NVIDIA if NVIDIA_API_KEY is set, else Claude if set up), nvidia, claude, none."""
     choice = os.environ.get("JDQ_ANALYST", "auto").lower()
     key = os.environ.get("NVIDIA_API_KEY") or os.environ.get("JDQ_ANALYST_API_KEY")
     if choice == "none":
@@ -169,7 +169,21 @@ def analyst_from_env(copilot: Any, calls: LlmCallLog | None = None) -> Analyst |
             calls=calls,
             provider="NVIDIA" if choice != "openai" else "OpenAI-compatible",
         )
+    if choice == "auto" and not _claude_configured(copilot):
+        return None  # no provider configured: show "not configured" rather than failing every cycle
     return claude_analyst(copilot)
+
+
+def _claude_configured(copilot: Any) -> bool:
+    from jdquant.ai.copilot import _default_client
+
+    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+        return True
+    # A client injected by the host (tests, custom deployments) counts as configured.
+    return (
+        getattr(copilot, "_client", None) is not None
+        or getattr(copilot, "_client_factory", _default_client) is not _default_client
+    )
 
 
 def _record(

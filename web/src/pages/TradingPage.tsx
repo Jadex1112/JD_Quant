@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { ApiError, accountTrades, api, get, post, type Fill, type Instrument, type Order, type Position } from "../api";
 import { describe, useApp } from "../app-state";
 import { FillsTable, OrdersTable, PositionsTable } from "../components/tables";
@@ -6,10 +6,12 @@ import { Confirm, ModeBadge, Section, useData } from "../components/ui";
 import { num } from "../format";
 
 const CONFIRM_NOTIONAL = 10_000;
+const PriceChart = lazy(() => import("../components/PriceChart").then((m) => ({ default: m.PriceChart })));
 
 export function TradingPage() {
   const { can } = useApp();
   const [tab, setTab] = useState<"working" | "history" | "fills">("working");
+  const [charted, setCharted] = useState("");
   const working = useData(() => get<Order[]>("/orders?working_only=true"), [], 2000);
   const history = useData(() => get<Order[]>("/orders"), [], 5000);
   const positions = useData(() => get<Position[]>("/positions"), [], 2000);
@@ -24,8 +26,15 @@ export function TradingPage() {
   return (
     <div className="stack">
       <h1>Trading</h1>
+      {charted && (
+        <section className="card">
+          <Suspense fallback={<div className="muted small">Loading chart…</div>}>
+            <PriceChart instrumentId={charted} height={320} />
+          </Suspense>
+        </section>
+      )}
       <div className="grid two" style={{ alignItems: "start" }}>
-        {can("order:create") && <OrderTicket onSubmitted={refresh} />}
+        {can("order:create") && <OrderTicket onSubmitted={refresh} onInstrument={setCharted} />}
         <Section title="Positions">
           <PositionsTable positions={positions.data ?? []} />
         </Section>
@@ -46,7 +55,7 @@ export function TradingPage() {
   );
 }
 
-function OrderTicket({ onSubmitted }: { onSubmitted: () => void }) {
+function OrderTicket({ onSubmitted, onInstrument }: { onSubmitted: () => void; onInstrument?: (id: string) => void }) {
   const { accounts, notify } = useApp();
   const instruments = useData(() => get<Instrument[]>("/instruments"), [], 5000);
   const [accountId, setAccountId] = useState("");
@@ -72,6 +81,9 @@ function OrderTicket({ onSubmitted }: { onSubmitted: () => void }) {
     if (available.length && !available.some((i) => i.instrument_id === instrumentId)) setInstrumentId(available[0].instrument_id);
   }, [available, instrumentId]);
   const instrument = available.find((i) => i.instrument_id === instrumentId);
+  useEffect(() => {
+    if (instrumentId) onInstrument?.(instrumentId);
+  }, [instrumentId, onInstrument]);
   const refPrice = instrument?.reference_price ? Number(instrument.reference_price) : null;
   const notional = Number(quantity || 0) * Number(type === "LIMIT" ? price || refPrice || 0 : refPrice || 0);
 

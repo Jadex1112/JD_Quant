@@ -16,6 +16,7 @@ from jdquant.ai.models import ModelRegistry
 from jdquant.autopilot.engine import Autopilot
 from jdquant.connectivity.connections import ConnectionManager, HttpFactory
 from jdquant.connectivity.poller import VenuePoller
+from jdquant.marketdata.live import LiveMarket, SimulatedFeed
 from jdquant.persistence.store import Store
 from jdquant.platform import Platform, build_paper_platform
 from jdquant.security.audit import AuditLog
@@ -39,6 +40,7 @@ class Settings:
     allow_setup: bool = True
     background_polling: bool = False
     poll_interval: float = 2.0
+    demo_feed: bool = False  # simulated random-walk prices for instruments without a live source
     web_dir: Path | None = None  # built web UI; defaults to the bundled jdquant/web_dist
 
     @classmethod
@@ -51,6 +53,7 @@ class Settings:
             allow_setup=_flag("JDQ_ALLOW_SETUP", True),
             background_polling=_flag("JDQ_BACKGROUND_POLLING", True),
             poll_interval=float(os.environ.get("JDQ_POLL_INTERVAL", "2")),
+            demo_feed=_flag("JDQ_DEMO_FEED", False),
             web_dir=Path(os.environ["JDQ_WEB_DIR"]) if os.environ.get("JDQ_WEB_DIR") else None,
         )
 
@@ -102,7 +105,24 @@ def build_context(
     runner.models = models
     with platform.lock:
         runner.sync_all()  # resume RUNNING/PAUSED deployments after a restart (FR-19021)
-    services = {"connections": connections, "runner": runner, "poller": poller, "models": models}
+    live = LiveMarket()
+    platform.market.listeners.append(live.on_quote)
+    services = {
+        "connections": connections,
+        "runner": runner,
+        "poller": poller,
+        "models": models,
+        "live": live,
+    }
+    if settings.demo_feed:
+        feed = SimulatedFeed(
+            platform,
+            poller.on_quote,
+            has_source=lambda instrument_id: connections.data_source_for(instrument_id) is not None,
+            live=live,
+        )
+        feed.backfill(live)
+        services["demo_feed"] = feed
     context = AppContext(platform, store, audit, identity, SecretStore(store, box), settings, services)
     services["copilot"] = Copilot(
         store, platform.clock, audit, build_tools(context), client_factory=llm_client_factory

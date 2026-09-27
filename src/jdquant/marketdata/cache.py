@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -10,6 +11,8 @@ from enum import StrEnum
 from jdquant.core.clock import Clock
 from jdquant.core.events import EventBus
 from jdquant.marketdata.records import Candle, Quote, Trade
+
+log = logging.getLogger(__name__)
 
 
 class FeedStatus(StrEnum):
@@ -35,6 +38,7 @@ class MarketDataCache:
         self._bus = bus
         self._stale_after = stale_after
         self._state: dict[str, _State] = {}
+        self.listeners: list = []  # called with every quote (e.g. live charts); must not block
 
     def on_trade(self, trade: Trade) -> None:
         state = self._touch(trade.instrument_id)
@@ -43,6 +47,11 @@ class MarketDataCache:
     def on_quote(self, quote: Quote) -> None:
         state = self._touch(quote.instrument_id)
         state.quote = None if quote.is_crossed else quote
+        for listener in self.listeners:
+            try:
+                listener(quote)
+            except Exception:  # a chart must never break market data
+                log.exception("quote listener failed")
 
     def on_mark(self, instrument_id: str, price: Decimal) -> None:
         self._touch(instrument_id).mark = price

@@ -345,7 +345,47 @@ export interface AutopilotConfig {
   max_deployment_drawdown: number;
   min_paper_days: number;
   min_paper_trades: number;
-  explain_with_claude: boolean;
+  use_analyst: boolean;
+  analyst_can_veto: boolean;
+  loss_floor: number;
+  lock_in_gains: number;
+  daily_loss_limit: number;
+  max_cost_share: number;
+  vol_target: string;
+  max_participation: number;
+  portfolio_drawdown_limit: number;
+  halt_cooldown_days: number;
+  roll_days: number;
+  fx_rates: Record<string, string>;
+}
+
+export interface UniverseOption {
+  id: string;
+  label: string;
+  group: string;
+}
+
+export interface Protection {
+  budget: string;
+  equity: string;
+  floor: string;
+  cushion: string;
+  exposure: string;
+  floor_hit: boolean;
+}
+
+export interface ArmedAccount {
+  account_id: string;
+  capital_cap: string;
+  armed_by: string;
+  armed_at: string;
+  allow_futures: boolean;
+}
+
+export interface AnalystConcern {
+  instrument_id: string;
+  concern: string;
+  severity: "low" | "medium" | "high";
 }
 
 export interface PeriodStats {
@@ -356,6 +396,8 @@ export interface PeriodStats {
   win_rate?: number | null;
   positive_folds?: number;
   bars: number;
+  charges?: number;
+  charges_share?: number | null;
 }
 
 export interface EvaluationSummary {
@@ -369,6 +411,7 @@ export interface EvaluationSummary {
   dsr: number | null;
   passed: boolean;
   reasons: string[];
+  instruments?: string[];
 }
 
 export interface SelectedStrategy extends EvaluationSummary {
@@ -388,6 +431,8 @@ export interface AutopilotRun {
   skipped: Record<string, string>;
   summary: string | null;
   error: string | null;
+  analyst: string | null;
+  concerns: AnalystConcern[];
 }
 
 export interface ManagedDeployment {
@@ -406,15 +451,24 @@ export interface ManagedDeployment {
   source_deployment: string | null;
   live_deployment: string | null;
   expected: Partial<PeriodStats>;
+  account_id: string;
+  universe_id: string;
+  instruments: string[];
+  currency: string;
+  strategy: string;
+  rolled_to: string | null;
 }
 
 export interface AutopilotStatus {
   config: AutopilotConfig;
-  live: { armed: boolean; account_id: string | null; capital_cap: string; armed_by: string | null; armed_at: string | null };
+  live: { accounts: Record<string, ArmedAccount> };
+  halted_until: Record<string, string>;
+  protection: Record<"PAPER" | "LIVE", Protection>;
   progress: { running: boolean; done?: number; total?: number; message?: string; run_id?: string };
   last_run_at: string | null;
   next_run_at: string | null;
   paper_account: string;
+  analyst_available: boolean;
   managed: ManagedDeployment[];
   latest_run: AutopilotRun | null;
 }

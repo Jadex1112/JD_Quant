@@ -253,10 +253,16 @@ def order_events(order_id: str, request: Request, principal: Principal = Depends
 def list_fills(
     request: Request,
     account_id: str | None = None,
+    instrument_id: str | None = None,
     limit: int = 200,
     principal: Principal = Depends(require("order:view")),
 ):
-    fills = [f for f in ctx(request).platform.oms.fills if account_id is None or f.account_id == account_id]
+    fills = [
+        f
+        for f in ctx(request).platform.oms.fills
+        if (account_id is None or f.account_id == account_id)
+        and (instrument_id is None or f.instrument_id == instrument_id)
+    ]
     return [
         {
             "fill_id": f.fill_id,

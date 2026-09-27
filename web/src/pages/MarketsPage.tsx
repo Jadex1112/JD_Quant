@@ -1,15 +1,18 @@
-import { useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { get, type Instrument } from "../api";
 import { useApp } from "../app-state";
 import { Dialog, Empty, Section, StatusBadge, useData } from "../components/ui";
 import { num } from "../format";
 import { pushQuote } from "./TradingPage";
 
+const PriceChart = lazy(() => import("../components/PriceChart").then((m) => ({ default: m.PriceChart })));
+
 export function MarketsPage() {
   const { can, run } = useApp();
   const [venue, setVenue] = useState("");
   const [query, setQuery] = useState("");
   const [quoteFor, setQuoteFor] = useState<Instrument | null>(null);
+  const [charted, setCharted] = useState("");
   const instruments = useData(() => get<Instrument[]>("/instruments"), [], 3000);
   const all = instruments.data ?? [];
   const venues = [...new Set(all.map((i) => i.venue))].sort();
@@ -17,9 +20,20 @@ export function MarketsPage() {
     (i) => (!venue || i.venue === venue) && (!query || i.instrument_id.toLowerCase().includes(query.toLowerCase())),
   );
 
+  useEffect(() => {
+    if (!charted && all.length) setCharted(all[0].instrument_id);
+  }, [all, charted]);
+
   return (
     <div className="stack">
       <h1>Markets</h1>
+      {charted && (
+        <section className="card">
+          <Suspense fallback={<div className="muted small">Loading chart…</div>}>
+            <PriceChart instrumentId={charted} />
+          </Suspense>
+        </section>
+      )}
       <Section
         title={`Instruments (${shown.length})`}
         actions={
@@ -59,7 +73,10 @@ export function MarketsPage() {
                 {shown.map((i) => (
                   <tr key={i.instrument_id}>
                     <td>
-                      <strong>{i.symbol}</strong> <span className="small muted">{i.instrument_id}</span>
+                      <button className="link" onClick={() => setCharted(i.instrument_id)} aria-pressed={charted === i.instrument_id}>
+                        <strong>{i.symbol}</strong>
+                      </button>{" "}
+                      <span className="small muted">{i.instrument_id}</span>
                     </td>
                     <td>{i.venue}</td>
                     <td className="small">{i.asset_class}</td>

@@ -934,8 +934,11 @@ def test_analyst_selection_from_environment(monkeypatch):
     assert analyst_from_env(object()) is None
     monkeypatch.setenv("JDQ_ANALYST", "nvidia")
     assert analyst_from_env(object()) is None  # no key: off, with a warning
-    monkeypatch.setenv("NVIDIA_API_KEY", "k")
     monkeypatch.setenv("JDQ_ANALYST", "auto")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    assert analyst_from_env(object()) is None  # neither provider configured
+    monkeypatch.setenv("NVIDIA_API_KEY", "k")
     assert analyst_from_env(object()) is not None
 
 
