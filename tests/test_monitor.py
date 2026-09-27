@@ -8,7 +8,7 @@ from conftest import advance, set_quote
 from test_autopilot import TREND, FakeNim, Harness
 
 from jdquant.ai.analyst import ChatModel, OpenAICompatibleChat
-from jdquant.ai.prompts import TRADE_MONITOR, LlmCallLog
+from jdquant.ai.prompts import LOSS_REVIEW, TRADE_MONITOR, LlmCallLog
 from jdquant.autopilot.monitor import TradeMonitor, parse_verdicts
 from jdquant.core.types import Side
 from jdquant.marketdata.live import LiveMarket
@@ -20,19 +20,30 @@ class FakeChat(ChatModel):
 
     provider, model = "Fake", "fake-1"
 
-    def __init__(self, decide=None, fail=False):
+    def __init__(self, decide=None, fail=False, mistake="normal_loss"):
         self.decide = decide or (lambda kind, item: ("HOLD" if kind == "positions" else "APPROVE", 0.9))
         self.fail = fail
-        self.payloads = []
+        self.mistake = mistake
+        self.fail_reviews = False  # only the post-mortems fail
+        self.payloads, self.post_mortems = [], []
 
     def ask(self, template, payload, *, max_tokens=16384, timeout=None, thinking=True):
+        if template is LOSS_REVIEW:
+            self.post_mortems.append(payload)
+            if self.fail or self.fail_reviews:
+                return None
+            reviews = [
+                {"id": x["id"], "mistake": self.mistake, "diagnosis": "the spread was wide", "lesson": "wait"}
+                for x in payload["losses"]
+            ]
+            return json.dumps({"reviews": reviews})
         assert template is TRADE_MONITOR
         self.payloads.append(payload)
         if self.fail:
             return None
-        answer = {"positions": [], "entries": []}
-        for kind in ("positions", "entries"):
-            for item in payload[kind]:
+        answer = {"trades": [], "positions": [], "entries": []}
+        for kind in answer:
+            for item in payload.get(kind, []):
                 verdict, confidence = self.decide(kind, item)
                 answer[kind].append(
                     {"id": item["id"], "verdict": verdict, "confidence": confidence, "reason": "test"}
@@ -201,7 +212,7 @@ def test_nvidia_request_for_the_monitor():
     assert body["max_tokens"] == 8192 and body["chat_template_kwargs"] == {"enable_thinking": False}
     assert body["messages"][0]["content"] == TRADE_MONITOR.text
     rows = h.platform.store.query("SELECT template FROM llm_calls")
-    assert rows[0]["template"] == "autopilot.trade_monitor@v1"
+    assert rows[0]["template"] == "autopilot.trade_monitor@v2"
 
 
 def test_parse_verdicts_keeps_only_valid_answers():

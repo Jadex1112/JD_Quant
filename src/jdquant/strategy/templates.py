@@ -128,9 +128,9 @@ class MlSignal(Strategy):
 
 
 def _autopilot() -> tuple[type[Strategy], ...]:
-    from jdquant.autopilot.strategy import AutopilotStrategy, RotationStrategy
+    from jdquant.autopilot.strategy import AiTraderStrategy, AutopilotStrategy, RotationStrategy
 
-    return AutopilotStrategy, RotationStrategy
+    return AutopilotStrategy, RotationStrategy, AiTraderStrategy
 
 
 TEMPLATES: dict[str, type[Strategy]] = {

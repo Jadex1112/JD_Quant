@@ -357,6 +357,8 @@ export interface AutopilotConfig {
   halt_cooldown_days: number;
   roll_days: number;
   fx_rates: Record<string, string>;
+  decision_mode: "ai" | "strategies";
+  panel_size: number;
   monitor_enabled: boolean;
   monitor_mode: "advise" | "act";
   monitor_interval_seconds: number;
@@ -371,14 +373,14 @@ export interface AutopilotConfig {
 export interface MonitorReview {
   review_id: string;
   at: string;
-  kind: "POSITION" | "ENTRY";
+  kind: "POSITION" | "ENTRY" | "TRADE";
   deployment_id: string;
   instrument_id: string;
   mode: string;
   direction: number;
   quantity: string;
   price: string;
-  verdict: "HOLD" | "REDUCE" | "EXIT" | "APPROVE" | "REJECT" | "NO_ANSWER";
+  verdict: "HOLD" | "REDUCE" | "EXIT" | "APPROVE" | "REJECT" | "LONG" | "SHORT" | "FLAT" | "NO_ANSWER";
   confidence: number;
   reason: string;
   acted: boolean;
@@ -386,6 +388,39 @@ export interface MonitorReview {
   label: string;
   currency: string;
   moves: Record<string, number | null>;
+}
+
+export interface TradeLesson {
+  lesson_id: string;
+  at: string;
+  instrument_id: string;
+  mode: string;
+  direction: number;
+  entry_price: string;
+  exit_price: string;
+  pnl_inr: number;
+  minutes_held: number;
+  exit_reason: string;
+  label: string;
+  status: "pending" | "analysed" | "failed";
+  mistake: string;
+  diagnosis: string;
+  lesson: string;
+}
+
+export interface LearnedRule {
+  mistake: string;
+  cases: number;
+  instruments: string[];
+  loss_inr: number;
+  until: string;
+  text: string;
+}
+
+export interface LessonsStatus {
+  lessons: TradeLesson[];
+  rules: LearnedRule[];
+  open_trades: number;
 }
 
 export interface MonitorScore {
@@ -409,8 +444,25 @@ export interface MonitorStatus {
   calls_today: number;
   pending: { instrument_id: string; side: string; label: string; since: string }[];
   positions: MonitorReview[];
+  trader: {
+    instrument_id: string;
+    deployment_id: string;
+    position: string;
+    live_copies: number;
+    views: { label: string; view: "LONG" | "SHORT" | "FLAT" }[];
+    decision: MonitorReview | null;
+  }[];
   recent: MonitorReview[];
-  scorecard: { "15": MonitorScore; "60": MonitorScore; verdicts: Record<string, number>; acted: number };
+  scorecard: {
+    "15": MonitorScore;
+    "60": MonitorScore;
+    verdicts: Record<string, number>;
+    acted: number;
+    ai_book_paper_inr: number;
+    ai_book_live_inr: number;
+  };
+  decision_mode: "ai" | "strategies";
+  ai_trading: boolean;
 }
 
 export interface UniverseOption {

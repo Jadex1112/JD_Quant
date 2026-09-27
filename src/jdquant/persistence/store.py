@@ -185,6 +185,9 @@ class Store:
         rows = self.query("SELECT data FROM documents WHERE kind = ? AND id = ?", (kind, doc_id))
         return json.loads(rows[0]["data"]) if rows else None
 
+    def delete(self, kind: str, doc_id: str) -> None:
+        self.execute("DELETE FROM documents WHERE kind = ? AND id = ?", (kind, doc_id))
+
     def all(self, kind: str) -> list[dict[str, Any]]:
         return [
             json.loads(r["data"]) for r in self.query("SELECT data FROM documents WHERE kind = ?", (kind,))

@@ -36,7 +36,7 @@ from jdquant.autopilot.research import (
     strategy_name,
     strategy_parameters,
 )
-from jdquant.autopilot.strategy import AutopilotStrategy, RotationStrategy
+from jdquant.autopilot.strategy import AiTraderStrategy, AutopilotStrategy, RotationStrategy
 from jdquant.connectivity.connections import markets_of
 from jdquant.core.errors import PlatformError, ValidationError
 from jdquant.marketdata.instruments import Instrument
@@ -60,7 +60,11 @@ KIND = "autopilot"
 DECISIONS = "autopilot_decision"
 RUNS = "autopilot_run"
 ACTIVE = (DeploymentState.RUNNING, DeploymentState.PAUSED, DeploymentState.READY)
-VERSIONS = {"autopilot": AutopilotStrategy.version, "rotation": RotationStrategy.version}
+VERSIONS = {
+    "autopilot": AutopilotStrategy.version,
+    "rotation": RotationStrategy.version,
+    "ai_trader": AiTraderStrategy.version,
+}
 # INR per unit of each quote currency. Where the platform has a live price for the pair (e.g. OANDA
 # USD_JPY), the rate is derived from it instead; otherwise these defaults apply until edited.
 DEFAULT_FX = {
@@ -117,6 +121,12 @@ class AutopilotConfig:
     roll_days: int = 3  # roll futures this many days before expiry
     # INR per unit of other quote currencies, to size crypto in USDT from an INR budget. Update as rates move.
     fx_rates: dict[str, Decimal] = field(default_factory=lambda: dict(DEFAULT_FX))
+    # Who takes trades. "ai": the AI decides each minute, choosing among the live signals of the
+    # strategies that passed walk-forward testing (never a direction none of them holds). "strategies":
+    # each instrument's best tested strategy trades on its own and the AI reviews. Without a configured
+    # AI model the strategies trade on their own.
+    decision_mode: str = "ai"
+    panel_size: int = 5  # tested strategies whose signals the AI weighs per instrument
     # AI trade monitor: an LLM reviews every open autopilot position and proposed entry each minute.
     monitor_enabled: bool = True
     monitor_mode: str = "advise"  # advise: record verdicts only | act: close, halve or hold back trades
@@ -257,6 +267,7 @@ class Autopilot:
         self._venue_candles = venue_candles
         self._live_ready = live_ready or (lambda account_id: True)
         self._analyst = analyst
+        self.trade_monitor: Any = None  # the AI trade monitor attaches itself
         self.calendar = calendar or NseCalendar()
         self.config = decode(AutopilotConfig, store.get(KIND, "config") or encode(AutopilotConfig()))
         self.live = self._load_live(store.get(KIND, "live") or {})
@@ -407,6 +418,10 @@ class Autopilot:
             problems.append({"field": "max_weight", "message": "between 0 and 1"})
         if config.data_source not in ("auto", "venue", "synthetic"):
             problems.append({"field": "data_source", "message": "auto, venue or synthetic"})
+        if config.decision_mode not in ("ai", "strategies"):
+            problems.append({"field": "decision_mode", "message": "ai or strategies"})
+        if not 1 <= config.panel_size <= 10:
+            problems.append({"field": "panel_size", "message": "between 1 and 10"})
         if config.monitor_mode not in ("advise", "act"):
             problems.append({"field": "monitor_mode", "message": "advise or act"})
         if config.monitor_fallback not in ("allow", "block"):
@@ -705,6 +720,9 @@ class Autopilot:
             if m.universe_id not in self.config.universe and not m.universe_id.startswith("PORTFOLIO:"):
                 self._retire(m, ["the instrument was removed from the autopilot universe"], run)
                 continue
+            if m.strategy == "ai_trader":
+                self._review_ai_trader(m, result, run)
+                continue
             e = by_key.get((m.instrument_id, m.candidate))
             if e is None:
                 continue  # not re-tested this cycle (e.g. data gap): keep running
@@ -721,6 +739,47 @@ class Autopilot:
                 )
             else:
                 self._retire(m, ["its edge no longer holds up on fresh data:", *e.reasons], run)
+
+    def ai_trading(self) -> bool:
+        """The AI decides trades (a model is configured and the monitor is on)."""
+        monitor = self.trade_monitor
+        return (
+            self.config.decision_mode == "ai"
+            and self.config.monitor_enabled
+            and monitor is not None
+            and monitor.available
+        )
+
+    def panel_for(self, instrument_id: str, result: ResearchResult) -> list[Evaluation]:
+        """The instrument's best tested strategies the AI may follow (ML and baskets excluded)."""
+        passed = [
+            e
+            for e in result.evaluations
+            if e.passed
+            and e.instrument_id == instrument_id
+            and not e.is_portfolio
+            and e.candidate.signal != "ml"
+        ]
+        return sorted(passed, key=lambda e: e.score, reverse=True)[: self.config.panel_size]
+
+    def _review_ai_trader(self, m: Managed, result: ResearchResult, run: Run) -> None:
+        tested = [e for e in result.evaluations if e.instrument_id == m.instrument_id]
+        if not tested:
+            return  # not re-tested this cycle: keep trading
+        panel = self.panel_for(m.instrument_id, result)
+        if not panel:
+            self._retire(
+                m, ["none of the strategies the AI follows passes its tests on fresh data any more"], run
+            )
+            return
+        self._decide(
+            "KEEP",
+            f"AI keeps trading {m.instrument_id}",
+            [f"{len(panel)} tested strategies still pass; best: {_evidence(panel[0])}"],
+            instrument_id=m.instrument_id,
+            deployment_id=m.deployment_id,
+            run_id=run.run_id,
+        )
 
     def _deploy(self, result: ResearchResult, candles: dict[str, list[Candle]], run: Run) -> None:
         if self.floor_hit.get("PAPER"):
@@ -764,6 +823,35 @@ class Autopilot:
                 reverse=True,
             ) or [e]
             managed = None
+            panel = [] if e.is_portfolio else self.panel_for(e.instrument_id, result)
+            if self.ai_trading() and panel:
+                try:
+                    managed = self._start_ai_trader(panel, capital)
+                except PlatformError as exc:
+                    self._decide(
+                        "SKIP",
+                        f"Could not start the AI trader on {e.instrument_id}",
+                        [exc.message],
+                        instrument_id=e.instrument_id,
+                        run_id=run.run_id,
+                    )
+                    continue
+                used += capital
+                covered |= set(e.instruments)
+                self._decide(
+                    "DEPLOY",
+                    f"AI paper trading {e.instrument_id} with {capital:,}, "
+                    f"following {len(panel)} tested strategies",
+                    [
+                        "The AI decides long, short or flat each minute, only in a direction at least one of "
+                        "these strategies holds:",
+                        *[_evidence(x) for x in panel],
+                    ],
+                    instrument_id=e.instrument_id,
+                    deployment_id=managed.deployment_id,
+                    run_id=run.run_id,
+                )
+                continue
             for candidate in alternatives:
                 try:
                     managed = self._start_paper(candidate, capital, candles, run)
@@ -833,6 +921,60 @@ class Autopilot:
             instruments=list(e.instruments),
             currency=lead.quote_asset,
             strategy=name,
+        )
+        self._save(managed)
+        return managed
+
+    def _start_ai_trader(self, panel: list[Evaluation], capital: Decimal) -> Managed:
+        """An AI-trader deployment for one instrument; `capital` is in the budget currency."""
+        lead = self._p.instruments.get(panel[0].instrument_id)
+        research_config = self.config.research_config()
+        quote_capital = research_config.capital_for(lead, capital)
+        members = [
+            {
+                "key": e.candidate.key,
+                "label": e.candidate.label,
+                "params": strategy_parameters(e.candidate, quote_capital, research_config, lead),
+                "stats": {
+                    "validation_sharpe": _round(e.validation.get("sharpe")),
+                    "validation_return": _round(e.validation.get("return")),
+                    "holdout_return": _round(e.holdout.get("return")),
+                    "max_drawdown": _round(e.validation.get("max_drawdown")),
+                    "trades": e.validation.get("trades"),
+                    "win_rate": _round(e.validation.get("win_rate")),
+                    "luck_adjusted_confidence": _round(e.dsr),
+                },
+            }
+            for e in panel
+        ]
+        best = members[0]["params"]
+        params = {
+            "panel": json.dumps(members, default=str),
+            "capital": str(quote_capital),
+            "vol_target": str(research_config.vol_target),
+            "bars_per_year": best["bars_per_year"],
+            "intraday": best["intraday"],
+            "stop_loss": str(self.config.stop_loss),
+            "take_profit": str(self.config.take_profit),
+            "trailing_stop": str(self.config.trailing_stop),
+            "allow_short": lead.can_short,
+        }
+        deployment = self._launch("ai_trader", PAPER_AI_ACCOUNT, params, [lead.instrument_id], AUTOPILOT)
+        managed = Managed(
+            deployment.deployment_id,
+            lead.instrument_id,
+            "ai_trader",
+            f"AI trader following {len(members)} tested strategies",
+            "ai",
+            "PAPER",
+            capital,
+            params,
+            self._p.clock.now(),
+            expected=panel[0].validation,
+            universe_id=getattr(self, "_universe_of", {}).get(lead.instrument_id, lead.instrument_id),
+            instruments=[lead.instrument_id],
+            currency=lead.quote_asset,
+            strategy="ai_trader",
         )
         self._save(managed)
         return managed
@@ -1395,3 +1537,7 @@ def _downsample(points: list[tuple[datetime, float]], limit: int) -> list[list[A
     if points and sampled[-1] is not points[-1]:
         sampled.append(points[-1])
     return [[t.isoformat(), round(v, 5)] for t, v in sampled]
+
+
+def _round(value: Any) -> float | None:
+    return None if value is None else round(float(value), 4)

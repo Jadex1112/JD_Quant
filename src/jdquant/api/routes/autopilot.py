@@ -124,6 +124,8 @@ def monitor_status(
         "mode": config.monitor_mode,
         "interval_seconds": config.monitor_interval_seconds,
         "min_confidence": config.monitor_min_confidence,
+        "decision_mode": config.decision_mode,
+        "ai_trading": c.services["autopilot"].ai_trading(),
     }
 
 
@@ -132,6 +134,32 @@ def monitor_run(request: Request, principal: Principal = Depends(require("autopi
     """Review the open positions now instead of waiting for the next minute."""
     reviews = ctx(request).services["monitor"].review_now()
     return {"reviews": [encode(r) for r in reviews]}
+
+
+class ForgetIn(BaseModel):
+    mistake: str = Field(pattern="^(weak_consensus|wide_spread|late_session|chased_move)$")
+
+
+@router.get("/autopilot/lessons")
+def lessons(request: Request, principal: Principal = Depends(require("autopilot:view"))) -> dict[str, Any]:
+    """Post-mortems of losing trades and the rules learned from repeated mistakes."""
+    return ctx(request).services["monitor"].lessons_status()
+
+
+@router.post("/autopilot/lessons:forget")
+def forget_rule(
+    body: ForgetIn, request: Request, principal: Principal = Depends(require("autopilot:configure"))
+) -> dict[str, Any]:
+    """Stop enforcing a learned rule; only mistakes made after now count towards it again."""
+    c = ctx(request)
+    c.services["monitor"].lessons.forget(body.mistake)
+    c.audit.record(
+        actor=principal.user_id,
+        action="autopilot.forget_rule",
+        category="CONFIGURATION",
+        data={"mistake": body.mistake},
+    )
+    return c.services["monitor"].lessons_status()
 
 
 @router.post("/autopilot/protection:reset")

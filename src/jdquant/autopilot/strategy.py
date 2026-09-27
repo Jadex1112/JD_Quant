@@ -371,3 +371,137 @@ class RotationStrategy(Strategy):
                 self.ctx.buy(i, delta)
             elif delta < 0:
                 self.ctx.sell(i, -delta)
+
+
+class AiTraderStrategy(Strategy):
+    """The AI decides the trades, choosing among the signals of strategies that passed walk-forward tests.
+
+    This class never opens a position. On every bar it works out what each tested strategy on its panel
+    would hold now (long, short or flat) and keeps the AI's positions inside their stops and session
+    cutoffs. The AI trade monitor reads those views each minute, decides, and sends the orders; it may only
+    take a direction that at least one panel strategy currently holds.
+    """
+
+    name = "ai_trader"
+    version = "1.0.0"
+    description = "Trades chosen by the AI among the live signals of walk-forward-tested strategies."
+    parameters = {
+        "panel": Param(str, "[]", description="JSON list of tested strategies: key, label, params, stats"),
+        "stop_loss": Param(Decimal, "0.08", min=Decimal(0), max=Decimal("0.5"), description="0 disables"),
+        "take_profit": Param(Decimal, "0", min=Decimal(0), max=Decimal(5), description="0 disables"),
+        "trailing_stop": Param(
+            Decimal, "0", min=Decimal(0), max=Decimal("0.5"), description="exit this far from the best price"
+        ),
+        "allow_short": Param(bool, False, description="the instrument can be sold short"),
+        **COMMON,
+    }
+
+    def on_init(self) -> None:
+        import json
+
+        from jdquant.strategy.base import StrategyContext, validate_parameters
+
+        self.panel = json.loads(self.ctx.params["panel"])
+        self._members: list[tuple[dict, AutopilotStrategy]] = []
+        for spec in self.panel:
+            params = validate_parameters(AutopilotStrategy.parameters, spec["params"])
+            ctx = StrategyContext(
+                deployment_id=self.ctx.deployment_id,
+                account_id=self.ctx.account_id,
+                instruments=self.ctx.instruments,
+                params=params,
+                clock=self.ctx._clock,
+                oms=self.ctx._oms,
+                positions=self.ctx._positions,
+                history=self.ctx._history,
+                models=None,
+            )
+            member = AutopilotStrategy(ctx)
+            member.on_init()
+            self._members.append((spec, member))
+        self._held: dict[str, dict[str, str]] = {}  # instrument -> member key -> LONG/SHORT/FLAT
+        self._ready: set[str] = set()
+        self._best: dict[str, Decimal] = {}
+        self.stopped_at: dict[str, datetime] = {}
+
+    # ---- the panel's views ---------------------------------------------------------------------
+
+    def _advance(self, candle: Candle) -> None:
+        held = self._held.setdefault(candle.instrument_id, {})
+        for spec, member in self._members:
+            view = member.decide(candle)
+            if view == "enter":
+                held[spec["key"]] = "LONG"
+            elif view == "exit":
+                short = member.ctx.params["allow_short"] and member.ctx.params["signal"] in SHORTABLE
+                held[spec["key"]] = "SHORT" if short else "FLAT"
+            else:
+                held.setdefault(spec["key"], "FLAT")
+
+    def views(self, instrument_id: str) -> list[dict]:
+        """What each panel strategy would hold now, replaying history the first time it is asked."""
+        if instrument_id not in self._ready:
+            self._replay(instrument_id)
+        held = self._held.get(instrument_id, {})
+        return [{**spec, "view": held.get(spec["key"], "FLAT")} for spec, _ in self._members]
+
+    def _replay(self, instrument_id: str) -> None:
+        from jdquant.strategy.base import CandleHistory
+
+        candles = self.ctx.candles(instrument_id)
+        scratch = CandleHistory()
+        for _, member in self._members:
+            member.ctx._history = scratch
+        try:
+            for candle in candles:
+                scratch.append(candle)
+                self._advance(candle)
+        finally:
+            for _, member in self._members:
+                member.ctx._history = self.ctx._history
+        self._ready.add(instrument_id)
+
+    # ---- bars: update views, keep positions inside their limits ----------------------------------
+
+    def on_bar(self, candle: Candle) -> None:
+        i = candle.instrument_id
+        if i in self._ready:
+            self._advance(candle)
+        else:
+            self._replay(i)
+        position = self.ctx.position(i)
+        if position == 0:
+            self._best.pop(i, None)
+            return
+        if self.ctx.open_orders(i):
+            return
+        p = self.ctx.params
+        direction = 1 if position > 0 else -1
+        late = p["intraday"] and session_for(self.ctx.instrument(i)).past_intraday_cutoff(candle.close_ts)
+        if late or self._stopped_out(i, candle.close, direction):
+            self.stopped_at[i] = candle.close_ts
+            if position > 0:
+                self.ctx.sell(i, position)
+            else:
+                self.ctx.buy(i, -position)
+
+    def _stopped_out(self, instrument_id: str, price: Decimal, direction: int) -> bool:
+        p = self.ctx.params
+        entry = self.ctx.entry_price(instrument_id)
+        if entry <= 0:
+            return False
+        move = (price - entry) / entry * direction
+        if p["stop_loss"] > 0 and move <= -p["stop_loss"]:
+            return True
+        best = self._best.get(instrument_id, entry)
+        best = max(best, price) if direction > 0 else min(best, price)
+        self._best[instrument_id] = best
+        if p["trailing_stop"] > 0 and (best - price) / best * direction >= p["trailing_stop"]:
+            return True
+        return p["take_profit"] > 0 and move >= p["take_profit"]
+
+    def max_quantity(self, instrument_id: str, price: Decimal) -> Decimal:
+        """The largest position the AI may take: volatility-targeted, never leveraged."""
+        p = self.ctx.params
+        scale = volatility_scale(self.ctx.closes(instrument_id, 61), p["vol_target"], p["bars_per_year"])
+        return whole_lots(self.ctx.instrument(instrument_id), p["capital"] * scale, price)

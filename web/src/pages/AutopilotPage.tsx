@@ -10,6 +10,7 @@ import {
   type AnalystConcern,
   type ArmedAccount,
   type EvaluationSummary,
+  type LessonsStatus,
   type MonitorReview,
   type MonitorStatus,
   type Protection,
@@ -41,6 +42,10 @@ const DECISION_KIND: Record<string, string> = {
   DISARM: "warn",
   ROLL: "",
   HALT: "bad",
+  AI_TRADE: "ai",
+  LOSS: "bad",
+  LESSON: "ai",
+  RULE: "warn",
   AI_EXIT: "ai",
   AI_REDUCE: "ai",
   AI_REJECT: "ai",
@@ -54,8 +59,12 @@ const VERDICT: Record<string, string> = {
   REDUCE: "warn",
   EXIT: "bad",
   REJECT: "bad",
+  LONG: "good",
+  SHORT: "warn",
+  FLAT: "",
   NO_ANSWER: "",
 };
+const VIEW: Record<string, string> = { LONG: "good", SHORT: "warn", FLAT: "" };
 
 /** Spot gold and the major pairs on 1-hour bars: enough history for walk-forward evidence. */
 const FX_PRESET: Partial<AutopilotConfig> = {
@@ -132,6 +141,8 @@ export function AutopilotPage() {
       )}
 
       <MonitorPanel canRun={can("autopilot:run")} canConfigure={can("autopilot:configure")} />
+
+      <LessonsPanel canForget={can("autopilot:configure")} />
 
       <ProtectionPanel
         protection={s.protection}
@@ -374,10 +385,17 @@ function HowItWorks() {
           If you allow it, a high-severity concern vetoes that strategy — it can only remove risk, never add trades.
         </li>
         <li>
-          <strong>AI trade monitor, every minute.</strong> The AI looks at every open trade and every new entry with live prices, the
-          spread, one-minute bars and indicators, and says hold, reduce or exit (approve or reject for entries). In advise mode it only
-          comments; in act mode it may close, halve or hold back trades it is confident about. Each verdict is scored against what the
-          price did next, so you can see whether it helps.
+          <strong>The AI takes the trades, every minute.</strong> For each instrument it sees what every strategy that passed testing
+          would hold now — long, short or flat — with their track records, plus live prices, the spread, one-minute bars and indicators,
+          and decides the position. It may only trade a direction at least one tested strategy holds; a position no strategy supports any
+          more is closed. Sizes are capped, stops and capital protection always apply, and every decision is scored against what the
+          price did next. (Or choose to let the best strategy trade on its own while the AI reviews.)
+        </li>
+        <li>
+          <strong>Learn from losses.</strong> Every losing trade gets an AI post-mortem comparing the conditions at entry with what
+          happened: a normal loss, or a mistake such as entering on a wide spread, late in the session, against weak agreement or
+          chasing a stretched move. Lessons go into every later decision, and a mistake that repeats three times becomes a rule the
+          system enforces.
         </li>
         <li>
           <strong>Protect capital.</strong> Positions are sized to a volatility target. The book has a loss floor that rises to lock in
@@ -405,12 +423,16 @@ function MonitorPanel({ canRun, canConfigure }: { canRun: boolean; canConfigure:
   };
   return (
     <Section
-      title="AI trade monitor"
+      title={m.ai_trading ? "AI trader" : "AI trade monitor"}
       actions={
         <>
           {m.available ? <Badge kind="ai">{m.provider}</Badge> : <Badge>not configured</Badge>}
-          {m.enabled && m.available && (m.mode === "act" ? <Badge kind="warn">acting</Badge> : <Badge>advising</Badge>)}
-          {canConfigure && m.available && m.enabled && (
+          {m.ai_trading ? (
+            <Badge kind="live">AI takes the trades</Badge>
+          ) : (
+            m.enabled && m.available && (m.mode === "act" ? <Badge kind="warn">acting</Badge> : <Badge>advising</Badge>)
+          )}
+          {canConfigure && m.available && m.enabled && !m.ai_trading && (
             <button className="small" onClick={() => setMode(m.mode === "act" ? "advise" : "act")}>
               {m.mode === "act" ? "Switch to advise" : "Let it act…"}
             </button>
@@ -438,12 +460,75 @@ function MonitorPanel({ canRun, canConfigure }: { canRun: boolean; canConfigure:
       ) : (
         <div className="stack">
           <p className="small muted" style={{ margin: 0 }}>
-            {m.model} checks every open position and new entry every {m.interval_seconds >= 120 ? `${m.interval_seconds / 60} minutes` : `${m.interval_seconds} seconds`}
-            {m.mode === "act"
-              ? `, and acts when at least ${pct(m.min_confidence, 0)} confident — it can only close, halve or hold back trades.`
-              : ". Advice only: switch to act once its track record below is convincing."}{" "}
+            {m.ai_trading ? (
+              <>
+                Every {m.interval_seconds >= 120 ? `${m.interval_seconds / 60} minutes` : `${m.interval_seconds} seconds`} {m.model} looks
+                at what each tested strategy holds on every instrument and decides long, short or flat. It may only take a direction at least
+                one tested strategy holds, and only when at least {pct(m.min_confidence, 0)} confident; sizes are capped by volatility and
+                capital protection, and stops always apply.
+              </>
+            ) : (
+              <>
+                {m.model} checks every open position and new entry every{" "}
+                {m.interval_seconds >= 120 ? `${m.interval_seconds / 60} minutes` : `${m.interval_seconds} seconds`}
+                {m.mode === "act"
+                  ? `, and acts when at least ${pct(m.min_confidence, 0)} confident — it can only close, halve or hold back trades.`
+                  : ". Advice only: switch to act once its track record below is convincing."}
+              </>
+            )}{" "}
             Last review {time(m.last_run_at)} · {m.calls_today} calls today
           </p>
+          {m.decision_mode === "ai" && !m.ai_trading && (
+            <div className="alert small">The AI is set to take the trades, but no model is configured, so the strategies trade on their own.</div>
+          )}
+          {m.trader.length > 0 && (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Instrument</th>
+                    <th>Tested strategies hold</th>
+                    <th>AI position</th>
+                    <th>Latest decision</th>
+                    <th>Why</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {m.trader.map((t) => {
+                    const held = Number(t.position);
+                    return (
+                      <tr key={t.deployment_id}>
+                        <td>{t.instrument_id}</td>
+                        <td>
+                          <div className="chips">
+                            {t.views.map((v, i) => (
+                              <span key={i} title={v.label}>
+                                <Badge kind={VIEW[v.view] ?? ""}>{v.view}</Badge>
+                              </span>
+                            ))}
+                          </div>
+                        </td>
+                        <td>
+                          {held === 0 ? <span className="muted">flat</span> : `${held > 0 ? "Long" : "Short"} ${num(Math.abs(held))}`}
+                          {t.live_copies > 0 && <div className="small muted">+ {t.live_copies} live</div>}
+                        </td>
+                        <td>
+                          {t.decision ? (
+                            <>
+                              <VerdictBadge r={t.decision} /> <span className="small muted">{pct(t.decision.confidence, 0)} · {time(t.decision.at)}</span>
+                            </>
+                          ) : (
+                            <span className="small muted">waiting for the first review</span>
+                          )}
+                        </td>
+                        <td className="small" style={{ whiteSpace: "normal", minWidth: 220 }}>{t.decision?.reason}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
           {m.last_error && <div className="alert warn small">{m.last_error}</div>}
           {m.pending.length > 0 && (
             <div className="alert small" aria-live="polite">
@@ -451,7 +536,7 @@ function MonitorPanel({ canRun, canConfigure }: { canRun: boolean; canConfigure:
             </div>
           )}
           {m.positions.length === 0 ? (
-            <Empty>No open autopilot positions to watch right now.</Empty>
+            m.trader.length === 0 && <Empty>No open autopilot positions to watch right now.</Empty>
           ) : (
             <div className="table-wrap">
               <table>
@@ -489,6 +574,13 @@ function MonitorPanel({ canRun, canConfigure }: { canRun: boolean; canConfigure:
                 <span className="small muted">of {score(h).judged} verdicts scored</span>
               </div>
             ))}
+            {m.ai_trading && (
+              <div className="card kpi">
+                <span className="label">AI trader P&amp;L (paper)</span>
+                <span className={`value ${tone(m.scorecard.ai_book_paper_inr)}`}>₹{signed(m.scorecard.ai_book_paper_inr)}</span>
+                <span className="small muted">after charges{m.scorecard.ai_book_live_inr ? ` · live ₹${signed(m.scorecard.ai_book_live_inr)}` : ""}</span>
+              </div>
+            )}
             <div className="card kpi">
               <span className="label">Value of its actions (60 min)</span>
               <span className={`value ${tone(score("60").value_of_actions_inr)}`}>₹{signed(score("60").value_of_actions_inr)}</span>
@@ -507,7 +599,8 @@ function MonitorPanel({ canRun, canConfigure }: { canRun: boolean; canConfigure:
                   <div className="row">
                     <VerdictBadge r={r} />
                     <strong>
-                      {r.kind === "ENTRY" ? "Entry" : "Position"} · {r.direction > 0 ? "long" : "short"} {r.instrument_id}
+                      {r.kind === "TRADE" ? "Decision" : r.kind === "ENTRY" ? "Entry" : "Position"} ·{" "}
+                      {r.kind === "TRADE" ? r.instrument_id : `${r.direction > 0 ? "long" : "short"} ${r.instrument_id}`}
                     </strong>
                     <span className="muted">
                       {time(r.at)} · {pct(r.confidence, 0)}
@@ -521,6 +614,100 @@ function MonitorPanel({ canRun, canConfigure }: { canRun: boolean; canConfigure:
           )}
         </div>
       )}
+    </Section>
+  );
+}
+
+const MISTAKE_LABEL: Record<string, string> = {
+  normal_loss: "normal loss",
+  weak_consensus: "weak agreement",
+  wide_spread: "wide spread",
+  late_session: "late in session",
+  chased_move: "chased the move",
+  against_trend: "against the trend",
+  volatility_spike: "news-like spike",
+  other: "other mistake",
+};
+
+function LessonsPanel({ canForget }: { canForget: boolean }) {
+  const { run } = useApp();
+  const data = useData(() => get<LessonsStatus>("/autopilot/lessons"), [], 10000);
+  const d = data.data;
+  if (!d || (d.lessons.length === 0 && d.rules.length === 0)) return null;
+  const forget = async (mistake: string) => {
+    await run(() => post("/autopilot/lessons:forget", { mistake }), "Rule forgotten");
+    data.reload();
+  };
+  return (
+    <Section title="Lessons from losing trades" actions={<span className="small muted">{d.open_trades} trades being tracked</span>}>
+      <div className="stack">
+        {d.rules.length > 0 && (
+          <div>
+            <div className="small muted" style={{ marginBottom: 4 }}>
+              Rules learned from repeated mistakes — enforced on every new entry
+            </div>
+            <ul className="small" style={{ margin: 0, paddingLeft: 18 }}>
+              {d.rules.map((r) => (
+                <li key={r.mistake} style={{ marginBottom: 4 }}>
+                  <Badge kind="warn">{MISTAKE_LABEL[r.mistake] ?? r.mistake}</Badge> <strong>{r.text}</strong>{" "}
+                  <span className="muted">
+                    — {r.cases} losing trades on {r.instruments.join(", ")} cost ₹{num(-r.loss_inr, 0)}; applies until {time(r.until)}
+                  </span>{" "}
+                  {canForget && (
+                    <button className="link small" onClick={() => forget(r.mistake)}>
+                      Forget
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {d.lessons.length > 0 && (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Trade</th>
+                  <th className="num">Loss (₹)</th>
+                  <th>What went wrong</th>
+                  <th>Lesson</th>
+                </tr>
+              </thead>
+              <tbody>
+                {d.lessons.slice(0, 15).map((x) => (
+                  <tr key={x.lesson_id}>
+                    <td className="small">
+                      {x.direction > 0 ? "Long" : "Short"} {x.instrument_id}
+                      <div className="muted">
+                        {num(x.entry_price)} → {num(x.exit_price)} · {x.minutes_held} min · {time(x.at)}
+                      </div>
+                    </td>
+                    <td className="num neg">{num(x.pnl_inr, 2)}</td>
+                    <td className="small" style={{ whiteSpace: "normal", minWidth: 220 }}>
+                      {x.status === "pending" ? (
+                        <span className="muted">AI review pending…</span>
+                      ) : x.status === "failed" ? (
+                        <span className="muted">the AI could not review it</span>
+                      ) : (
+                        <>
+                          <Badge kind={x.mistake === "normal_loss" ? "" : "warn"}>{MISTAKE_LABEL[x.mistake] ?? x.mistake}</Badge> {x.diagnosis}
+                        </>
+                      )}
+                      <div className="muted">{x.exit_reason}</div>
+                    </td>
+                    <td className="small" style={{ whiteSpace: "normal", minWidth: 180 }}>{x.lesson}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <p className="small muted" style={{ margin: 0 }}>
+          Every losing trade is reviewed. Most losses are normal — every sound strategy loses on a large share of its trades — so only a
+          mistake that repeats three times within 30 days becomes a rule, with its limit taken from the losing trades themselves.
+        </p>
+      </div>
     </Section>
   );
 }
@@ -878,6 +1065,7 @@ function SettingsDialog({ config, onClose }: { config: AutopilotConfig; onClose:
     "monitor_min_confidence",
     "monitor_cooldown_minutes",
     "monitor_max_calls_per_day",
+    "panel_size",
   ];
   const toNumbers = (): AutopilotConfig => {
     const out = { ...form, fx_rates: { ...form.fx_rates, USDT: usdt, USDC: usdt, USD: usdt } } as Record<string, unknown>;
@@ -980,14 +1168,31 @@ function SettingsDialog({ config, onClose }: { config: AutopilotConfig; onClose:
           </div>
         </details>
         <details open>
-          <summary className="small">AI trade monitor (every minute)</summary>
+          <summary className="small">AI trading (every minute)</summary>
           <div className="stack" style={{ marginTop: 8 }}>
+            <fieldset style={{ border: "none", padding: 0, margin: 0 }}>
+              <legend className="small muted">Who takes the trades</legend>
+              <label className="field inline">
+                <input type="radio" name="decision-mode" checked={form.decision_mode === "ai"} onChange={() => set("decision_mode", "ai")} /> The
+                AI, using the signals of the strategies that passed testing — it may only trade a direction at least one of them holds
+              </label>
+              <label className="field inline">
+                <input
+                  type="radio"
+                  name="decision-mode"
+                  checked={form.decision_mode === "strategies"}
+                  onChange={() => set("decision_mode", "strategies")}
+                />{" "}
+                The best tested strategy on each instrument, exactly as backtested — the AI reviews
+              </label>
+            </fieldset>
+            {form.decision_mode === "ai" && numberField("panel_size", "Tested strategies the AI weighs per instrument (1–10)")}
             <label className="field inline">
               <input type="checkbox" checked={form.monitor_enabled} onChange={(e) => set("monitor_enabled", e.target.checked)} /> Review every
               open autopilot trade and every new entry with the AI
             </label>
             <fieldset style={{ border: "none", padding: 0, margin: 0 }} disabled={!form.monitor_enabled}>
-              <legend className="small muted">What the AI may do</legend>
+              <legend className="small muted">When strategies trade on their own, the AI may</legend>
               <label className="field inline">
                 <input type="radio" name="monitor-mode" checked={form.monitor_mode === "advise"} onChange={() => set("monitor_mode", "advise")} />{" "}
                 Advise — record and show verdicts; strategies trade exactly as backtested

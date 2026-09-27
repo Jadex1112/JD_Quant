@@ -5,7 +5,7 @@ Institutional-grade, AI-driven quantitative trading platform.
 This repository contains:
 
 1. **[Volume 2 – Master Software Requirements Specification](docs/srs/README.md)**: 100 chapters and 1,109 uniquely identified requirements covering functional and non-functional requirements, interfaces, system behaviour, and acceptance criteria.
-2. **The platform (`src/jdquant`)**: a single-node (T1, CON-009) modular monolith with a persistent trading core, an AI autopilot that researches, backtests and trades on its own, login and permissions, OANDA (spot gold XAU/USD and forex), Fyers (NSE stocks and ETFs, MCX commodities, NSE currency futures), Binance (crypto, including tokenized gold) and Alpaca connectivity, an AI trade monitor that reviews every trade each minute, live price charts, and a REST API.
+2. **The platform (`src/jdquant`)**: a single-node (T1, CON-009) modular monolith with a persistent trading core, an AI autopilot that researches, backtests and trades on its own, login and permissions, OANDA (spot gold XAU/USD and forex), Fyers (NSE stocks and ETFs, MCX commodities, NSE currency futures), Binance (crypto, including tokenized gold) and Alpaca connectivity, an AI that takes trades each minute from the signals of walk-forward-tested strategies and learns from its losing trades, live price charts, and a REST API.
 3. **The web UI (`web/`)**: a React single-page app served by the same process.
 
 ## Quick start
@@ -33,7 +33,7 @@ Development: `npm run dev` in `web/` serves the UI with hot reload on port 5173 
 Tests and checks:
 
 ```bash
-.venv/bin/pytest                     # 234 tests, traced to SRS acceptance criteria
+.venv/bin/pytest                     # 253 tests, traced to SRS acceptance criteria
 .venv/bin/ruff check . && .venv/bin/ruff format --check .
 (cd web && npm run typecheck)
 ```
@@ -94,29 +94,50 @@ Each cycle:
 
 These limits bound losses; they cannot guarantee profits. Markets can gap through stops, and a strategy that passed every test can still stop working.
 
-### The AI trade monitor: every trade, every minute
+### The AI takes the trades, based on the tested strategies
 
-Once a minute (configurable, 30 s to 1 h), the AI looks at every open autopilot position and every entry a strategy wants to make. It receives:
-- the bid, ask and spread;
-- the last 30 one-minute bars;
-- RSI, 20/50-period averages, average true range and 15/60-minute change;
-- the trading session and time to the cutoff;
-- the position's entry price, profit or loss and time held;
-- the strategy and its stops;
-- its own previous verdict.
+With an AI model configured (see below), the AI decides the trades. **Who takes the trades** in the settings can also hand them back to the strategies.
 
-It answers HOLD, REDUCE or EXIT for positions and APPROVE or REJECT for entries, each with a confidence and a one-sentence reason citing the numbers.
+1. Research picks the instruments with evidence. For each, up to five of the strategies that passed every test form its panel.
+2. The instrument gets an *AI trader* deployment on the `paper-ai` account. On every bar it works out what each panel strategy would hold now: long, short or flat.
+3. Every minute (configurable, 30 s to 1 h), the AI receives, for each instrument:
+   - what each tested strategy holds, with its out-of-sample record (Sharpe, returns, holdout, win rate, trades, luck-adjusted confidence);
+   - the bid, ask and spread;
+   - the last 30 one-minute bars, RSI, averages, average true range and the session;
+   - its current position;
+   - its lessons from past losses (below).
 
-- **Advise** (default): verdicts are shown next to each position, and the strategies trade exactly as backtested.
-- **Act**: verdicts at or above the confidence floor (70%) take effect. EXIT closes the position, REDUCE halves it, and neither re-enters for an hour. New entries wait up to three minutes for approval, and a confident REJECT drops the entry. The AI can only take risk away; it never opens, adds to or reverses a position. If the model does not answer, entries go ahead (or are skipped, if you choose).
+   It answers LONG, SHORT, FLAT or HOLD, with a size, a confidence and a one-sentence reason.
+4. Code enforces the limits before any order:
+   - Only a direction at least one tested strategy currently holds may be taken. A position whose direction no strategy holds any more is closed automatically.
+   - Opening needs 70% confidence. Size is at most the volatility-targeted, unlevered position, scaled down by capital protection.
+   - Nothing opens while the market is closed, past the intraday cutoff, after a loss-floor stop or drawdown halt, during the hour after a stop-out, or against a learned rule.
+   - Stops and the trailing stop are checked on every bar.
+5. Proven AI traders are promoted to armed live accounts under the same rules as strategies. Each live copy follows the same decisions, sized to its own capital.
 
-The AI's judgement cannot be backtested, so each verdict is scored against the price 15 and 60 minutes later. The page shows how often it was right, and what its actions earned or cost in rupees (loss avoided minus gain missed). Switch to act only once that record is convincing. A daily call budget (1,500 by default) caps the cost.
+Without an AI model, or with **the best tested strategy** chosen, each instrument's best strategy trades on its own. The AI then reviews once a minute: in *advise* mode it only comments; in *act* mode it may close, halve or hold back trades it is at least 70% confident about. Either way it can never open or add to a position.
+
+An AI's decisions cannot be backtested, so each one is scored against the price 15 and 60 minutes later, and the AI trader's own P&L is shown next to the strategies' backtested results. Keep it on paper until that record is convincing. A daily call budget (1,500 by default) caps the cost.
+
+### Learning from losing trades
+
+Every autopilot trade, whether opened by the AI or by a strategy, is recorded with the conditions at entry:
+- what each tested strategy held and the share that agreed;
+- the spread as a share of the one-minute range;
+- RSI and minutes to the session cutoff;
+- the reason given for the trade.
+
+When a trade closes at a loss, the AI writes a post-mortem. It sees the entry conditions, the exit, how long the trade was held, and the best and worst move during it. It first decides whether the loss was **normal**: every sound strategy loses on a large share of its trades. Otherwise it names the mistake visible at entry (weak agreement, wide spread, too late in the session, chasing a stretched move, against the trend, a news-like spike) and writes a one-line lesson.
+
+- Recent lessons for the instrument, and the rules learned so far, go into every later decision.
+- A mistake that repeats **three times within 30 days** becomes a rule the code enforces on new entries. Its limit comes from the losing trades themselves, for example "no entry when the spread is 45% or more of the typical one-minute range". A rule lapses after 30 days without a new case and can be forgotten from the Autopilot page.
+- Normal losses never create rules: reacting to every loss would fit the system to noise.
 
 ### The AI analyst (NVIDIA Nemotron or Claude)
 
 After each research cycle, the analyst receives the leaderboard and selections: returns, Sharpe, drawdowns, charges, trade counts and the deployments already running. It answers with JSON: a plain-language summary and a list of concerns (overfitting, costs, concentration, regime risk…). The briefing appears on the Autopilot page with severity badges, and each call is logged with its tokens and latency.
 
-The analyst does **not** pick trades, because an LLM's trade choices cannot be backtested honestly: it has already read about the history it would be tested on. If you tick **Let a high-severity concern veto a strategy**, such a concern removes that strategy from the cycle. The analyst can only take risk away, never add it. If the analyst is unreachable, the cycle carries on without a briefing.
+The research-cycle analyst does not pick strategies; selection comes from the walk-forward tests. If you tick **Let a high-severity concern veto a strategy**, such a concern removes that strategy from the cycle. The analyst can only take risk away, never add it. If the analyst is unreachable, the cycle carries on without a briefing.
 
 To use NVIDIA's hosted Nemotron (an OpenAI-compatible API at `https://integrate.api.nvidia.com/v1`), set the key in the server's environment. Never put it in code or a file in the repository:
 
@@ -127,7 +148,7 @@ export NVIDIA_API_KEY=nvapi-...        # from build.nvidia.com
 
 The request uses `nvidia/nemotron-3-ultra-550b-a55b` with reasoning enabled (`enable_thinking`), a low temperature (0.2) for consistent reviews, and a non-streaming call; the reasoning text is discarded and only the JSON answer is kept. Without `NVIDIA_API_KEY`, Claude is used when `ANTHROPIC_API_KEY` is set. With neither, the page shows the analyst as not configured.
 
-Research, paper and live all run the same strategy code with the same parameters, so what was backtested is what trades. Risk limits and the kill switch apply to the autopilot exactly as to manual trading.
+When the strategies trade on their own, research, paper and live run the same strategy code with the same parameters, so what was backtested is what trades. When the AI trades, it chooses among those same tested signals, and its own decisions are measured live. Risk limits and the kill switch apply to the autopilot exactly as to manual trading.
 
 ## Live charts
 
@@ -220,7 +241,7 @@ Autopilot settings (universe, budget, bar size, stops, capital protection, charg
 | `security` | 39–40, 42 | Passwords, TOTP, sessions, API keys, roles, encrypted secrets, audit chain |
 | `connectivity` | 45–46 | Venue adapter contract, Fyers, Binance and Alpaca adapters, broker OAuth, account router, connection manager, poller |
 | `markets` | — | Charges for NSE cash, MCX, currency futures, crypto, and forex spread and financing; per-market sessions (incl. forex 24/5) and asset groups |
-| `autopilot` | 24–25, 57 | Autopilot strategy, candidate generation, walk-forward research with deflated Sharpe, the controller, and the per-minute AI trade monitor |
+| `autopilot` | 24–25, 57 | Autopilot strategies (incl. the AI trader), candidate generation, walk-forward research with deflated Sharpe, the controller, the per-minute AI trader and monitor, and lessons from losing trades |
 | `ai` | 52–59, 63 | Features, training, model registry, optimizer, prompts, copilot and its tools, the autopilot analyst |
 | `api` | 80 | `/api/v1` REST resources with problem-details errors; serves the web UI |
 
