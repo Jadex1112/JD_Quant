@@ -115,6 +115,9 @@ class AutopilotConfig:
     daily_loss_limit: float = 0.03  # of the budget per account per day, enforced by the risk engine
     max_cost_share: float = 0.5  # reject strategies whose charges eat more of the gross profit than this
     vol_target: Decimal = Decimal("0.2")  # annualized volatility each position is sized to
+    # Most notional per unit of capital on margin markets (forex, metals, futures, NSE intraday), capped
+    # per market; 1 = no leverage. Leverage multiplies losses as well as gains.
+    leverage: Decimal = Decimal(1)
     max_participation: float = 0.01  # largest position as a share of daily traded value (real data only)
     portfolio_drawdown_limit: float = 0.10  # of the budget: cut the whole book to cash beyond this
     halt_cooldown_days: int = 5
@@ -144,6 +147,7 @@ class AutopilotConfig:
         return ResearchConfig(
             max_cost_share=self.max_cost_share,
             vol_target=self.vol_target,
+            leverage=self.leverage,
             max_participation=self.max_participation if real_data else 0.0,
             fx_rates=fx_rates or {**DEFAULT_FX, **self.fx_rates},
             interval_seconds=self.interval_seconds,
@@ -420,6 +424,8 @@ class Autopilot:
             problems.append({"field": "data_source", "message": "auto, venue or synthetic"})
         if config.decision_mode not in ("ai", "strategies"):
             problems.append({"field": "decision_mode", "message": "ai or strategies"})
+        if not Decimal(1) <= config.leverage <= Decimal(50):
+            problems.append({"field": "leverage", "message": "between 1 (none) and 50"})
         if not 1 <= config.panel_size <= 10:
             problems.append({"field": "panel_size", "message": "between 1 and 10"})
         if config.monitor_mode not in ("advise", "act"):
@@ -958,6 +964,7 @@ class Autopilot:
             "take_profit": str(self.config.take_profit),
             "trailing_stop": str(self.config.trailing_stop),
             "allow_short": lead.can_short,
+            "leverage": best.get("leverage", "1"),
         }
         deployment = self._launch("ai_trader", PAPER_AI_ACCOUNT, params, [lead.instrument_id], AUTOPILOT)
         managed = Managed(

@@ -52,17 +52,27 @@ COMMON = {
     "bars_per_year": Param(int, 248, min=1, max=1_000_000, description="bars per year for this market"),
     "intraday": Param(bool, False, description="exit before the session's intraday cutoff; no late entries"),
     "trade_after": Param(str, "", description="ISO time; bars closing earlier only warm up"),
+    "leverage": Param(
+        Decimal, "1", min=Decimal(1), max=Decimal(50),
+        description="most notional per unit of capital; 1 = no leverage (margin products only)",
+    ),
 }  # fmt: skip
 
 
-def volatility_scale(closes, vol_target: Decimal, bars_per_year: int) -> Decimal:
-    """Fraction of capital to deploy so the position runs at about `vol_target` (at most 1: no leverage)."""
+def volatility_scale(
+    closes, vol_target: Decimal, bars_per_year: int, leverage: Decimal = Decimal(1)
+) -> Decimal:
+    """Notional per unit of capital so the position runs at about `vol_target`, at most `leverage`.
+
+    With leverage 1 the position never exceeds its capital. A quiet market (e.g. EUR/USD at 7% a year)
+    under a 20% target would want nearly 3x; it gets that only if leverage allows.
+    """
     if vol_target <= 0:
-        return Decimal(1)
+        return leverage
     vol = realized_volatility(closes, bars_per_year)
     if not vol:
         return Decimal(1)
-    return min(Decimal(1), vol_target / Decimal(str(vol)))
+    return min(leverage, vol_target / Decimal(str(vol)))
 
 
 class AutopilotStrategy(Strategy):
@@ -280,7 +290,9 @@ class AutopilotStrategy(Strategy):
 
     def _size(self, instrument_id: str, price: Decimal) -> Decimal:
         p = self.ctx.params
-        scale = volatility_scale(self.ctx.closes(instrument_id, 61), p["vol_target"], p["bars_per_year"])
+        scale = volatility_scale(
+            self.ctx.closes(instrument_id, 61), p["vol_target"], p["bars_per_year"], p["leverage"]
+        )
         return whole_lots(self.ctx.instrument(instrument_id), p["capital"] * scale, price)
 
 
@@ -362,7 +374,7 @@ class RotationStrategy(Strategy):
             closes = self.ctx.closes(i, 61)
             if not closes:
                 continue
-            scale = volatility_scale(closes, p["vol_target"], p["bars_per_year"])
+            scale = volatility_scale(closes, p["vol_target"], p["bars_per_year"], p["leverage"])
             target = whole_lots(self.ctx.instrument(i), slot * scale, closes[-1])
             delta = target - position
             if target and abs(delta) < target * Decimal("0.2"):
@@ -501,7 +513,9 @@ class AiTraderStrategy(Strategy):
         return p["take_profit"] > 0 and move >= p["take_profit"]
 
     def max_quantity(self, instrument_id: str, price: Decimal) -> Decimal:
-        """The largest position the AI may take: volatility-targeted, never leveraged."""
+        """The largest position the AI may take: volatility-targeted, within the allowed leverage."""
         p = self.ctx.params
-        scale = volatility_scale(self.ctx.closes(instrument_id, 61), p["vol_target"], p["bars_per_year"])
+        scale = volatility_scale(
+            self.ctx.closes(instrument_id, 61), p["vol_target"], p["bars_per_year"], p["leverage"]
+        )
         return whole_lots(self.ctx.instrument(instrument_id), p["capital"] * scale, price)

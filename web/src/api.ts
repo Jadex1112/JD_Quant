@@ -352,6 +352,7 @@ export interface AutopilotConfig {
   daily_loss_limit: number;
   max_cost_share: number;
   vol_target: string;
+  leverage: string;
   max_participation: number;
   portfolio_drawdown_limit: number;
   halt_cooldown_days: number;

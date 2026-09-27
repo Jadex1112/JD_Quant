@@ -632,9 +632,9 @@ class TradeMonitor:
         if not sized:
             instrument = self._p.instruments.get(instrument_id)
             review.reason = (
-                f"{answer['reason']} — not traded: the size allowed without leverage is below the "
-                f"minimum of {instrument.min_quantity} {instrument.base_asset}; raise the budget "
-                "or the per-position share"
+                f"{answer['reason']} — not traded: the size allowed at this leverage is below the "
+                f"minimum of {instrument.min_quantity} {instrument.base_asset}; raise the budget, "
+                "the per-position share or the leverage"
             )
             self._save(review)
             return review

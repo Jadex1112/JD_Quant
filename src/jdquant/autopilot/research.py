@@ -141,6 +141,27 @@ def candidate_grid(interval_seconds: int = 86400) -> list[Candidate]:
     return grid
 
 
+# The most leverage each kind of market offers retail accounts (brokers may allow less).
+MAX_LEVERAGE = {"forex": Decimal(30), "metal": Decimal(20), "future": Decimal(10), "intraday": Decimal(5)}
+
+
+def market_leverage(instrument: Instrument, intraday: bool) -> tuple[Decimal, str]:
+    """The leverage cap of the instrument's market and a name for it (1: cash market, no leverage)."""
+    if instrument.venue in FX_VENUES:
+        kind = "metal" if instrument.base_asset in ("XAU", "XAG", "XPT", "XPD") else "forex"
+        return MAX_LEVERAGE[kind], kind
+    if instrument.is_future:
+        return MAX_LEVERAGE["future"], "future"
+    if intraday and instrument.venue == "NSE":
+        return MAX_LEVERAGE["intraday"], "intraday"
+    return Decimal(1), "cash"
+
+
+def leverage_for(instrument: Instrument, config: ResearchConfig) -> Decimal:
+    cap, _ = market_leverage(instrument, config.intraday)
+    return max(Decimal(1), min(config.leverage, cap))
+
+
 def applies(candidate: Candidate, instrument: Instrument) -> bool:
     """Whether a candidate makes sense for the instrument's market."""
     fx = instrument.venue in FX_VENUES
@@ -194,6 +215,8 @@ class ResearchConfig:
     max_cost_share: float = 0.5
     # Largest position as a share of daily traded value; 0 disables (synthetic data has no real volume).
     max_participation: float = 0.0
+    # Most notional per unit of capital, where the market allows margin (see `leverage_for`); 1 = none.
+    leverage: Decimal = Decimal(1)
     # Budget currency units per unit of each quote currency (e.g. INR per USDT), to size non-INR markets.
     fx_rates: dict[str, Decimal] = field(default_factory=lambda: {"INR": Decimal(1)})
 
@@ -315,9 +338,13 @@ def research(
                 f"only {len(series)} bars of history; at least {minimum} are needed"
             )
             continue
-        # Positions are never levered: a futures lot's full notional must fit one position's budget.
+        # A lot's notional must fit one position's budget times the leverage allowed on its market.
         lot_value = series[-1].close * instrument.lot_size * instrument.contract_multiplier
-        per_position = config.capital_for(instrument) * Decimal(str(config.max_weight))
+        per_position = (
+            config.capital_for(instrument)
+            * Decimal(str(config.max_weight))
+            * leverage_for(instrument, config)
+        )
         if lot_value > per_position:
             skipped[instrument.instrument_id] = (
                 f"one lot is worth {lot_value:,.0f} {instrument.quote_asset}, more than the "
@@ -576,6 +603,7 @@ def strategy_parameters(
     bars_per_year = int(config.periods_for(instrument)) if instrument else int(config.periods_per_year)
     common = {
         "capital": str(capital),
+        "leverage": str(leverage_for(instrument, config)) if instrument else "1",
         "vol_target": str(config.vol_target),
         "bars_per_year": max(1, bars_per_year),
         "intraday": config.intraday,

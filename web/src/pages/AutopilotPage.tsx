@@ -185,6 +185,13 @@ export function AutopilotPage() {
             <dd>
               ₹{num(s.config.capital, 0)} across up to {s.config.max_positions} positions (max {pct(s.config.max_weight, 0)} each),{" "}
               {s.config.product === "CNC" ? "positional" : "intraday"}, each sized to {pct(Number(s.config.vol_target), 0)} yearly volatility
+              {Number(s.config.leverage) > 1 ? (
+                <>
+                  , <strong className="neg">up to {num(s.config.leverage)}× leverage</strong> on margin markets
+                </>
+              ) : (
+                ", no leverage"
+              )}
             </dd>
             <dt>Bars</dt>
             <dd>{INTERVALS.find(([v]) => v === s.config.interval_seconds)?.[1] ?? `${s.config.interval_seconds}s`}</dd>
@@ -1143,7 +1150,8 @@ function SettingsDialog({ config, onClose }: { config: AutopilotConfig; onClose:
               ))}
             </select>
           </label>
-          {numberField("vol_target", "Volatility target per position (yearly)", "0.2 = size each position so it moves about 20% a year; never leveraged")}
+          {numberField("vol_target", "Volatility target per position (yearly)", "0.2 = size each position so it moves about 20% a year")}
+          {numberField("leverage", "Leverage (1 = none)", "Most notional per ₹1 of capital on margin markets")}
           {numberField("stop_loss", "Stop-loss (fraction)", "0.08 = exit 8% against entry; 0 disables")}
           {numberField("trailing_stop", "Trailing stop (fraction)", "0.05 = exit 5% from the best close since entry; 0 disables")}
           {numberField("history_bars", "History (bars)")}
@@ -1156,6 +1164,15 @@ function SettingsDialog({ config, onClose }: { config: AutopilotConfig; onClose:
             </select>
           </label>
         </div>
+        {Number(form.leverage) > 1 && (
+          <div className="alert warn small">
+            <strong>Leverage multiplies losses as well as gains.</strong> At {num(form.leverage)}×, a {pct(1 / Number(form.leverage), 0)} move
+            against a full position wipes out its capital. It applies only where the market offers margin, and never above that market&apos;s
+            cap: forex 30×, gold and silver 20×, futures 10×, NSE intraday 5×; NSE delivery and crypto spot stay at 1×. Volatility
+            targeting still decides the size — quiet markets use more of the leverage, wild ones less — and the loss floor, daily loss
+            limit and stops still apply.
+          </div>
+        )}
         <details open>
           <summary className="small">Capital protection</summary>
           <div className="form-grid" style={{ marginTop: 8 }}>
