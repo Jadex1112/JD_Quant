@@ -83,6 +83,33 @@ MIGRATIONS: list[str] = [
     CREATE TRIGGER audit_append_only_u BEFORE UPDATE ON audit BEGIN SELECT RAISE(ABORT, 'audit is append-only'); END;
     CREATE TRIGGER audit_append_only_d BEFORE DELETE ON audit BEGIN SELECT RAISE(ABORT, 'audit is append-only'); END;
     """,
+    # 3: AI inference records and LLM call log
+    """
+    CREATE TABLE inferences (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        inference_id TEXT NOT NULL UNIQUE,
+        model TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        stage TEXT NOT NULL,
+        instrument_id TEXT,
+        at TEXT NOT NULL,
+        data TEXT NOT NULL
+    );
+    CREATE INDEX inferences_model ON inferences(model, version);
+    CREATE TABLE llm_calls (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        at TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        template TEXT NOT NULL,
+        model TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL,
+        output_tokens INTEGER NOT NULL,
+        latency_ms INTEGER NOT NULL,
+        outcome TEXT NOT NULL
+    );
+    CREATE INDEX llm_calls_user ON llm_calls(user_id, at);
+    CREATE TRIGGER inferences_append_only_u BEFORE UPDATE ON inferences BEGIN SELECT RAISE(ABORT, 'inferences are append-only'); END;
+    """,
 ]
 
 

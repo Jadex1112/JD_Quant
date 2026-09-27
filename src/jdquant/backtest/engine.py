@@ -55,6 +55,7 @@ class BacktestConfig:
     risk_limits: list[RiskLimit] = field(default_factory=list)
     periods_per_year: float | None = None
     seed: int = 0
+    models: Any = None  # ModelRegistry for ML strategies; backtests use the PRODUCTION version
 
 
 @dataclass
@@ -187,6 +188,8 @@ def run_backtest(config: BacktestConfig) -> BacktestResult:
         positions=positions,
         trading=trading,
         history=history,
+        models=config.models,
+        record_inference=False,
     )
 
     last_close: dict[str, Decimal] = {}

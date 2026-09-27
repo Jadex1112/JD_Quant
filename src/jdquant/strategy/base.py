@@ -10,7 +10,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, ClassVar
 
 from jdquant.core.clock import Clock
-from jdquant.core.errors import ValidationError
+from jdquant.core.errors import PlatformError, ValidationError
 from jdquant.core.types import Side
 from jdquant.marketdata.records import Candle
 from jdquant.oms.manager import OrderManager
@@ -97,6 +97,7 @@ class StrategyContext:
         oms: OrderManager,
         positions: PositionEngine,
         history: CandleHistory,
+        models: Any = None,
     ):
         self.deployment_id = deployment_id
         self.account_id = account_id
@@ -106,8 +107,20 @@ class StrategyContext:
         self._oms = oms
         self._positions = positions
         self._history = history
+        self._models = models
         self.state: dict[str, Any] = {}
         self.logger = logging.getLogger(f"jdquant.strategy.{deployment_id}")
+
+    def predict(self, model: str, instrument_id: str) -> float:
+        """Score the latest closed bar with the model's PRODUCTION version (Chapter 59)."""
+        if self._models is None:
+            raise PlatformError("MODELS_UNAVAILABLE", "no model registry is attached to this deployment")
+        window = self.candles(instrument_id)
+        return self._models.predict(
+            model, window, instrument_id=instrument_id, record=self._record_inference
+        ).value
+
+    _record_inference = True
 
     def now(self) -> datetime:
         return self._clock.now()

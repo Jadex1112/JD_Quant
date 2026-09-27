@@ -31,6 +31,8 @@ class StrategyHost:
         positions: PositionEngine,
         trading: TradingEngine,
         history: CandleHistory,
+        models=None,
+        record_inference: bool = True,
         max_errors: int = 3,
         error_window: timedelta = timedelta(seconds=60),
     ):
@@ -51,7 +53,9 @@ class StrategyHost:
             oms=oms,
             positions=positions,
             history=history,
+            models=models,
         )
+        self.ctx._record_inference = record_inference
         self.strategy = strategy_cls(self.ctx)
         self._bus = bus
         bus.subscribe("order.fill", self._on_fill)

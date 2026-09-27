@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from jdquant.ai.copilot import Copilot
+from jdquant.ai.copilot_tools import build_tools
+from jdquant.ai.models import ModelRegistry
 from jdquant.connectivity.connections import ConnectionManager, HttpFactory
 from jdquant.connectivity.poller import VenuePoller
 from jdquant.persistence.store import Store
@@ -60,6 +64,7 @@ def build_context(
     platform: Platform | None = None,
     *,
     http_factory: HttpFactory | None = None,
+    llm_client_factory: Callable[[], Any] | None = None,
 ) -> AppContext:
     settings = settings or Settings.from_env()
     box = SecretBox(load_master_key(settings.data_dir))
@@ -86,7 +91,13 @@ def build_context(
     )
     runner = DeploymentRunner(platform, connections.data_source_for)
     poller = VenuePoller(platform, connections, runner, interval=settings.poll_interval)
+    models = ModelRegistry(store, platform.clock, platform.bus, single_user=platform.trading.single_user)
+    runner.models = models
     with platform.lock:
         runner.sync_all()  # resume RUNNING/PAUSED deployments after a restart (FR-19021)
-    services = {"connections": connections, "runner": runner, "poller": poller}
-    return AppContext(platform, store, audit, identity, SecretStore(store, box), settings, services)
+    services = {"connections": connections, "runner": runner, "poller": poller, "models": models}
+    context = AppContext(platform, store, audit, identity, SecretStore(store, box), settings, services)
+    services["copilot"] = Copilot(
+        store, platform.clock, audit, build_tools(context), client_factory=llm_client_factory
+    )
+    return context

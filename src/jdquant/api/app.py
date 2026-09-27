@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from jdquant import __version__
 from jdquant.api.context import AppContext, Settings, build_context
 from jdquant.api.deps import Forbidden, Unauthenticated
-from jdquant.api.routes import admin, auth, connections, research, trading
+from jdquant.api.routes import admin, ai, auth, connections, research, trading
 from jdquant.core.errors import NotFoundError, PlatformError, ValidationError
 from jdquant.platform import Platform
 
@@ -25,6 +25,9 @@ _STATUS_BY_CODE = {
     "MFA_REQUIRED": 401,
     "ACCOUNT_LOCKED": 423,
     "MFA_CODE_INVALID": 400,
+    "COPILOT_UNAVAILABLE": 503,
+    "COPILOT_QUOTA_EXCEEDED": 429,
+    "COPILOT_ACTION_PENDING": 409,
 }
 
 
@@ -102,7 +105,7 @@ def create_app(
             "maintenance_mode": trading_engine.maintenance_mode,
         }
 
-    for module in (auth, admin, trading, research, connections):
+    for module in (auth, admin, trading, research, connections, ai):
         app.include_router(module.router)
     return app
 

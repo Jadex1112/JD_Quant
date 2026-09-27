@@ -163,7 +163,7 @@ def test_fills_and_events_are_append_only(db):
         p.store.execute("DELETE FROM fills")
     with pytest.raises(sqlite3.IntegrityError):
         p.store.execute("UPDATE events SET event_type = 'x'")
-    assert p.store.schema_version == 2
+    assert p.store.schema_version == 3
 
 
 def test_orders_blocked_while_recovering(platform):

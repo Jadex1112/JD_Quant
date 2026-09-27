@@ -414,6 +414,11 @@ class TradingEngine:
         )
         return switch
 
+    def active_kill_switches_for(
+        self, account_id: str, deployment_id: str, instrument_id: str | None = None
+    ) -> list[KillSwitch]:
+        return list(self._covering_switches(account_id, deployment_id, instrument_id))
+
     def _covering_switches(self, account_id: str, deployment_id: str, instrument_id: str | None):
         return (
             s

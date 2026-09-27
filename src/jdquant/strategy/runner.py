@@ -34,6 +34,7 @@ class DeploymentRunner:
         self._platform = platform
         self._data_source = data_source
         self.hosted: dict[str, _Hosted] = {}
+        self.models = None  # ModelRegistry, attached by the application
         self._aggregators: dict[tuple[str, int], CandleAggregator] = {}
 
     def sync(self, deployment: Deployment) -> None:
@@ -66,6 +67,7 @@ class DeploymentRunner:
                 positions=self._platform.positions,
                 trading=self._platform.trading,
                 history=history,
+                models=self.models,
             ),
             history,
         )
