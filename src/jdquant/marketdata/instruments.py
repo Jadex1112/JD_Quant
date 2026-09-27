@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from enum import StrEnum
 
@@ -47,6 +48,12 @@ class Instrument:
     contract_multiplier: Decimal = Decimal(1)
     status: InstrumentStatus = InstrumentStatus.ACTIVE
     aliases: tuple[tuple[str, str], ...] = field(default=())
+    expiry: datetime | None = None  # futures: last trading time
+    underlying: str | None = None  # futures: the root symbol, e.g. GOLDM for MCX:GOLDM26JANFUT
+
+    @property
+    def is_future(self) -> bool:
+        return self.expiry is not None
 
     @property
     def instrument_id(self) -> str:

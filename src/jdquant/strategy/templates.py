@@ -127,10 +127,10 @@ class MlSignal(Strategy):
             self.ctx.order_target(candle.instrument_id, Decimal(0))
 
 
-def _autopilot() -> type[Strategy]:
-    from jdquant.autopilot.strategy import AutopilotStrategy
+def _autopilot() -> tuple[type[Strategy], ...]:
+    from jdquant.autopilot.strategy import AutopilotStrategy, RotationStrategy
 
-    return AutopilotStrategy
+    return AutopilotStrategy, RotationStrategy
 
 
 TEMPLATES: dict[str, type[Strategy]] = {
@@ -141,6 +141,6 @@ TEMPLATES: dict[str, type[Strategy]] = {
         BollingerReversion,
         DonchianBreakout,
         MlSignal,
-        _autopilot(),
+        *_autopilot(),
     )
 }

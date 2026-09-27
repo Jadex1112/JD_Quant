@@ -403,6 +403,8 @@ class ConnectionManager:
                 platform.oms.on_execution_report(report)
 
         adapter.set_report_handler(handle)
+        if hasattr(adapter, "lookup"):
+            adapter.lookup = platform.instruments.get
         self.connections[connection.connection_id] = connection
         self.adapters[connection.connection_id] = adapter
         if connection.account_id:

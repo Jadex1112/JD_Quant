@@ -1,5 +1,6 @@
 """Fyers login/session handling, symbol master, Indian charges and NSE hours."""
 
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from urllib.parse import parse_qsl, urlsplit
@@ -71,8 +72,9 @@ def test_connection_waits_for_login_then_registers_live_account():
 
 def test_symbol_master_keeps_nse_equities_only():
     platform, _, conn, _ = _setup()
-    assert conn.instrument_count == 2
+    assert conn.instrument_count == 7  # 3 cash (incl. an ETF) + 3 MCX + 1 currency futures
     assert platform.instruments.get("NSE:SBIN-EQ").tick_size == Decimal("0.05")
+    assert platform.instruments.get("NSE:GOLDBEES-EQ").asset_class.value == "ETF"
     assert platform.instruments.get("NSE:RELIANCE-EQ").tick_size == Decimal("0.1")
     with pytest.raises(PlatformError):
         platform.instruments.get("NSE:NIFTY50-INDEX")
@@ -203,7 +205,7 @@ def test_login_through_the_api_and_browser_redirect(platform):
               "api_secret": fake.secret, "base_currency": "INR", "settings": {"product": "CNC"}},
     ).json()  # fmt: skip
     assert created["status"] == "LOGIN_REQUIRED" and created["requires_login"]
-    assert created["markets"] == ["NSE"]
+    assert created["markets"] == ["NSE", "MCX"]
     login = client.post(f"/api/v1/connections/{created['connection_id']}:login").json()
     assert login["redirect_uri"] == "http://testserver/api/v1/connections/oauth/callback"
     state = dict(parse_qsl(urlsplit(login["login_url"]).query))["state"]
@@ -222,7 +224,7 @@ def test_login_through_the_api_and_browser_redirect(platform):
     conn = client.get("/api/v1/connections").json()[0]
     assert conn["status"] == "CONNECTED" and conn["account_id"] and conn["session_expires_at"]
     accounts = {a["account_id"]: a for a in client.get("/api/v1/accounts").json()}
-    assert accounts[conn["account_id"]]["markets"] == ["NSE"]
+    assert accounts[conn["account_id"]]["markets"] == ["NSE", "MCX"]
     assert (
         client.put(f"/api/v1/connections/{conn['connection_id']}/pin", json={"pin": "12ab"}).status_code
         == 422
@@ -234,3 +236,35 @@ def test_login_through_the_api_and_browser_redirect(platform):
     events = [e["action"] for e in client.get("/api/v1/audit-events").json()]
     assert "connection.login" in events and "connection.pin.set" in events
     assert "1234" not in str(client.get("/api/v1/audit-events").json())
+
+
+def test_commodity_and_currency_futures():
+    platform, manager, conn, fake = _setup()
+    gold = platform.instruments.get("MCX:GOLDM26JANFUT")
+    assert gold.is_future and gold.underlying == "GOLDM" and gold.asset_class.value == "COMMODITY"
+    assert gold.lot_size == 1 and gold.contract_multiplier == 10  # MCX quantity is in lots
+    usd = platform.instruments.get("NSE:USDINR26JANFUT")
+    assert usd.asset_class.value == "FX" and usd.lot_size == 1000 and usd.contract_multiplier == 1
+    assert platform.instruments.get("MCX:GOLDM26FEBFUT").expiry > gold.expiry
+    for missing in ("MCX:GOLDM27JANFUT", "MCX:GOLDM26JAN72000CE"):  # too far out, and an option
+        with pytest.raises(PlatformError):
+            platform.instruments.get(missing)
+
+    fake.quotes["MCX:GOLDM26JANFUT"] = (Decimal("7200"), Decimal("7201"))  # keep 1 lot under the risk limit
+    manager.set_watchlist(conn.connection_id, ["MCX:GOLDM26JANFUT"])
+    poller = VenuePoller(platform, manager, DeploymentRunner(platform, manager.data_source_for))
+    poller.tick()
+    order = platform.oms.submit(
+        OrderRequest(conn.account_id, "MCX:GOLDM26JANFUT", Side.SELL, OrderType.MARKET, Decimal(1))
+    )
+    placed = json.loads(
+        next(r for r in fake.requests if r.method == "POST" and r.url.path.endswith("orders/sync")).content
+    )
+    assert placed["productType"] == "MARGIN" and placed["qty"] == 1  # futures carry as MARGIN, 1 lot
+    poller.tick()
+    assert order.status is OrderStatus.FILLED
+    fill = platform.oms.fills[-1]
+    assert Decimal(0) < fill.fee < Decimal(40)  # derivative charges on ₹72k notional, not equity STT
+    assert (
+        platform.positions.net_quantity(conn.account_id, "MCX:GOLDM26JANFUT") == -1
+    )  # short futures allowed

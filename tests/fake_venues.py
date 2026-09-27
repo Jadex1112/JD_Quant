@@ -7,7 +7,7 @@ import hmac
 import itertools
 import json
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from urllib.parse import parse_qsl, urlsplit
 
@@ -394,9 +394,31 @@ SYMBOL_MASTER_CSV = (
     "NSE:SBIN-EQ,10,10,3045,SBIN,3045,-1.0,XX,10100000003045,None,None,None\n"
     "10100000002885,RELIANCE INDUSTRIES LTD,0,1,0.1,INE002A01018,0915-1530|1815-1915:,1691157600,,"
     "NSE:RELIANCE-EQ,10,10,2885,RELIANCE,2885,-1.0,XX,10100000002885,None,None,None\n"
+    "10100000014428,NIPPON INDIA ETF GOLD BEES,0,1,0.01,INF204KB17I5,0915-1530|1815-1915:,1691157600,,"
+    "NSE:GOLDBEES-EQ,10,10,14428,GOLDBEES,14428,-1.0,XX,10100000014428,None,None,None\n"
     "101000000026000,NIFTY50-INDEX,10,1,0.05,,0915-1530|1815-1915:,1691157600,,"
     "NSE:NIFTY50-INDEX,10,10,26000,NIFTY50,26000,-1.0,XX,101000000026000,None,None,None\n"
 )
+
+
+def futures_master(now: datetime) -> dict:
+    """MCX and NSE currency futures masters (JSON, keyed by ticker), front and next month plus noise."""
+    near, far, too_far = (int((now + timedelta(days=d)).timestamp()) for d in (20, 50, 400))
+
+    def fut(ticker, multiplier, tick, expiry, opt="XX"):
+        return ticker, {"symTicker": ticker, "qtyMultiplier": multiplier, "tickSize": tick,
+                        "expiryDate": str(expiry), "optType": opt}  # fmt: skip
+
+    return {
+        "MCX": dict([
+            fut("MCX:GOLDM26JANFUT", 10, 1, near),
+            fut("MCX:GOLDM26FEBFUT", 10, 1, far),
+            fut("MCX:CRUDEOIL26JANFUT", 100, 1, near),
+            fut("MCX:GOLDM27JANFUT", 10, 1, too_far),
+            fut("MCX:GOLDM26JAN72000CE", 10, 1, near, "CE"),
+        ]),
+        "CDS": dict([fut("NSE:USDINR26JANFUT", 1000, 0.0025, near)]),
+    }  # fmt: skip
 
 
 class FakeFyers:
@@ -409,7 +431,10 @@ class FakeFyers:
         self.pin = "1234"
         self.token = fake_jwt(self.now.replace(hour=23))
         self.refresh_token = "refresh-1"
-        self.quotes = {"NSE:SBIN-EQ": (Decimal("799.9"), Decimal("800.1"))}
+        self.quotes = {
+            "NSE:SBIN-EQ": (Decimal("799.9"), Decimal("800.1")),
+            "MCX:GOLDM26JANFUT": (Decimal("72000"), Decimal("72010")),
+        }
         self.cash = Decimal(100_000)
         self.book: dict[str, dict] = {}
         self._ids = itertools.count(26010500001)
@@ -439,6 +464,10 @@ class FakeFyers:
         path = url.path
         body = json.loads(request.content) if request.content else {}
         if url.netloc == "public.fyers.in":
+            if path.endswith("MCX_COM_sym_master.json"):
+                return _json(200, futures_master(self.now)["MCX"])
+            if path.endswith("NSE_CD_sym_master.json"):
+                return _json(200, futures_master(self.now)["CDS"])
             return httpx.Response(200, text=SYMBOL_MASTER_CSV)
         if path == "/api/v3/validate-authcode":
             if body.get("appIdHash") != self.app_hash() or body.get("code") != self.auth_code:

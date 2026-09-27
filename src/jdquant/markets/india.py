@@ -6,17 +6,17 @@ defaults follow Fyers' published plan. Every rate is a field so it can be matche
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta, timezone
+from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 
 from jdquant.core.types import Side
 from jdquant.execution.simulator import FeeSchedule
-from jdquant.marketdata.instruments import Instrument
+from jdquant.marketdata.instruments import AssetClass, Instrument
+from jdquant.markets.sessions import IST as IST  # re-exported for existing callers
+from jdquant.markets.sessions import MarketSession
 from jdquant.oms.orders import Liquidity
 
-IST = timezone(timedelta(hours=5, minutes=30), "IST")
 PAISA = Decimal("0.01")
 
 
@@ -81,33 +81,73 @@ class IndiaEquityFees(FeeSchedule):
 
 
 @dataclass(frozen=True)
-class NseCalendar:
-    """Regular NSE cash-market session in IST. Holidays are supplied by configuration or the broker."""
+class IndiaDerivativeFees(FeeSchedule):
+    """Charges on one executed MCX commodity or NSE currency futures order, in rupees (approximate)."""
 
-    open_time: time = time(9, 15)
-    close_time: time = time(15, 30)
-    intraday_cutoff: time = time(15, 10)  # exit intraday positions before the broker's auto square-off
-    holidays: frozenset[date] = field(default_factory=frozenset)
+    brokerage_rate: Decimal = Decimal("0.0003")
+    brokerage_cap: Decimal = Decimal(20)
+    ctt_sell: Decimal = Decimal("0.0001")  # commodity transaction tax, non-agri futures, sell side
+    exchange_txn: Decimal = Decimal("0.000021")
+    sebi_fee: Decimal = Decimal("0.000001")
+    stamp_buy: Decimal = Decimal("0.00002")
+    gst: Decimal = Decimal("0.18")
 
-    def is_trading_day(self, day: date) -> bool:
-        return day.weekday() < 5 and day not in self.holidays
+    def fee(
+        self, instrument: Instrument, side: Side, quantity: Decimal, price: Decimal, liquidity: Liquidity
+    ) -> Decimal:
+        return self.breakdown(side, instrument.notional(quantity, price))["total"]
 
-    def is_open(self, at: datetime) -> bool:
-        local = at.astimezone(IST)
-        return self.is_trading_day(local.date()) and self.open_time <= local.time() < self.close_time
+    def breakdown(self, side: Side, turnover: Decimal) -> dict[str, Decimal]:
+        brokerage = min(turnover * self.brokerage_rate, self.brokerage_cap)
+        exchange, sebi = turnover * self.exchange_txn, turnover * self.sebi_fee
+        parts = {
+            "brokerage": brokerage,
+            "ctt": turnover * self.ctt_sell if side is Side.SELL else Decimal(0),
+            "exchange": exchange,
+            "sebi": sebi,
+            "stamp": turnover * self.stamp_buy if side is Side.BUY else Decimal(0),
+            "gst": (brokerage + exchange + sebi) * self.gst,
+        }
+        parts = {k: v.quantize(PAISA, ROUND_HALF_UP) for k, v in parts.items()}
+        parts["total"] = sum(parts.values(), Decimal(0))
+        return parts
 
-    def past_intraday_cutoff(self, at: datetime) -> bool:
-        local = at.astimezone(IST)
-        return local.time() >= self.intraday_cutoff
+    def fingerprint(self) -> list[str]:
+        return [type(self).__name__, str(self.brokerage_rate), str(self.ctt_sell), str(self.exchange_txn)]
 
-    def next_open(self, at: datetime) -> datetime:
-        local = at.astimezone(IST)
-        day = local.date()
-        if local.time() >= self.open_time:
-            day += timedelta(days=1)
-        while not self.is_trading_day(day):
-            day += timedelta(days=1)
-        return datetime.combine(day, self.open_time, IST)
 
-    def session_close(self, day: date) -> datetime:
-        return datetime.combine(day, self.close_time, IST)
+MCX_FEES = IndiaDerivativeFees()
+CURRENCY_FEES = IndiaDerivativeFees(
+    ctt_sell=Decimal(0), exchange_txn=Decimal("0.0000035"), stamp_buy=Decimal("0.000001")
+)
+
+
+def fees_for(instrument: Instrument, product: Product = Product.CNC) -> FeeSchedule:
+    """The charges model for an instrument's market (flat 10 bps outside India)."""
+    if instrument.venue == "MCX":
+        return MCX_FEES
+    if instrument.venue == "NSE" and instrument.asset_class is AssetClass.FX:
+        return CURRENCY_FEES
+    if instrument.venue == "NSE":
+        return IndiaEquityFees(product=product)
+    return FeeSchedule()
+
+
+@dataclass(frozen=True)
+class MarketFees(FeeSchedule):
+    """Routes every fill to its market's charges model (used by the paper venue)."""
+
+    product: Product = Product.CNC
+
+    def fee(
+        self, instrument: Instrument, side: Side, quantity: Decimal, price: Decimal, liquidity: Liquidity
+    ) -> Decimal:
+        return fees_for(instrument, self.product).fee(instrument, side, quantity, price, liquidity)
+
+    def fingerprint(self) -> list[str]:
+        return [type(self).__name__, self.product.value]
+
+
+@dataclass(frozen=True)
+class NseCalendar(MarketSession):
+    """NSE cash-market session (kept for callers that want India's equity hours explicitly)."""

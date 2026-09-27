@@ -26,7 +26,7 @@ from jdquant.strategy.runner import DeploymentRunner
 from jdquant.trading.engine import AccountMode, DeploymentState, TradingAccount
 
 TREND, NOISE = "NSE:TREND-EQ", "NSE:NOISE-EQ"
-GRID = 27  # daily-bar candidates per stock
+GRID = 29  # daily-bar candidates per stock
 START = datetime(2023, 1, 2, 10, 0, tzinfo=UTC)
 
 
@@ -85,7 +85,7 @@ def test_pure_noise_produces_no_selections():
     instruments = [nse(f"N{i}-EQ") for i in range(6)]
     candles = {i.instrument_id: noise(i.symbol, seed=200 + n) for n, i in enumerate(instruments)}
     result = research(instruments, candles, ResearchConfig())
-    assert result.trials == 6 * GRID and result.selections == []
+    assert result.trials == 6 * GRID + 3 and result.selections == []  # + 3 basket rotations
     assert all(not e.passed and e.reasons for e in result.evaluations)
     luck = sum(any("luck" in r for r in e.reasons) for e in result.evaluations)
     assert luck >= 0.95 * len(result.evaluations)  # the luck test alone rejects nearly all of them
@@ -141,7 +141,13 @@ class Harness:
             summarizer=summarizer,
         )
         self.autopilot.update_config(
-            {"universe": [TREND, NOISE], "capital": "500000", "min_paper_days": 5, "min_paper_trades": 1},
+            {
+                "universe": [TREND, NOISE],
+                "capital": "500000",
+                "min_paper_days": 5,
+                "min_paper_trades": 1,
+                "max_participation": 0,
+            },
             "tester",
         )
 
@@ -176,7 +182,7 @@ def test_cycle_deploys_winners_to_the_ai_paper_account():
     deployment = h.platform.trading.get_deployment(m.deployment_id)
     assert deployment.account_id == PAPER_AI_ACCOUNT and deployment.state is DeploymentState.RUNNING
     assert deployment.strategy_name == "autopilot" and deployment.created_by == "autopilot"
-    assert deployment.parameters["capital"] == "200000" and deployment.bar_interval_seconds == 86400
+    assert Decimal(deployment.parameters["capital"]) == 200000 and deployment.bar_interval_seconds == 86400
     assert m.deployment_id in h.runner.hosted
     assert h.kinds()[:2] == ["CYCLE", "DEPLOY"]
     assert h.autopilot.runs(1)[0].selected[0]["equity"]
@@ -268,7 +274,7 @@ def test_live_promotion_needs_arming_and_respects_the_cap():
     [live] = h.managed("LIVE")
     deployment = h.platform.trading.get_deployment(live.deployment_id)
     assert deployment.account_id == "fyers-1" and deployment.approved_by == "owner"
-    assert live.capital == Decimal(50_000) and deployment.parameters["capital"] == "50000"
+    assert live.capital == Decimal(50_000) and Decimal(deployment.parameters["capital"]) == 50000
     assert live.source_deployment == m.deployment_id
 
     h.autopilot.disarm_live("owner")
@@ -518,3 +524,24 @@ def test_resting_orders_on_the_ai_paper_account_fill_from_live_quotes():
     assert order.status is OrderStatus.OPEN
     poller.on_quote(Quote(TREND, h.clock.now(), Decimal("985"), Decimal(1), Decimal("987"), Decimal(1)))
     assert order.status is OrderStatus.FILLED
+
+
+def test_liquidity_filter_rejects_positions_too_big_for_the_market():
+    thin = [
+        c.__class__(
+            c.instrument_id,
+            c.interval_seconds,
+            c.open_ts,
+            c.close_ts,
+            c.open,
+            c.high,
+            c.low,
+            c.close,
+            Decimal(10),
+        )
+        for c in trending()
+    ]  # about ₹10k-30k traded a day
+    config = ResearchConfig(capital=Decimal(500_000), max_participation=0.01)
+    result = research([nse("TREND-EQ")], {TREND: thin}, config)
+    assert result.selections == []
+    assert all(any("too illiquid" in r for r in e.reasons) for e in result.evaluations)

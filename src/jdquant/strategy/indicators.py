@@ -154,3 +154,46 @@ def supertrend(
         elif not up and c[i] > upper:
             up = True
     return up, (lower if up else upper)
+
+
+# Forecast scalars that give each speed an average absolute forecast of about 10 (Carver, "Systematic
+# Trading"); the combined forecast is capped at ±20.
+EWMAC_SCALARS = {2: 10.6, 4: 7.5, 8: 5.3, 16: 3.75, 32: 2.65, 64: 1.87}
+
+
+def ewmac_forecast(values: Sequence[Number], fast: int = 8, speeds: int = 3) -> float | None:
+    """Multi-speed exponential moving-average crossover, the core trend signal of many CTAs.
+
+    For each speed (fast, 4·fast), (2·fast, 8·fast), … the EMA difference is divided by the recent
+    standard deviation of price changes, scaled to a common range, averaged, and capped at ±20.
+    Positive means up-trend; +10 is an average-strength signal.
+    """
+    data = _floats(values)
+    slowest = fast * 2 ** (speeds - 1) * 4
+    if len(data) < slowest + 26:
+        return None
+    changes = [data[i] - data[i - 1] for i in range(len(data) - 25, len(data))]
+    mean = sum(changes) / len(changes)
+    sigma = math.sqrt(sum((c - mean) ** 2 for c in changes) / (len(changes) - 1))
+    if sigma <= 0:
+        return None
+    forecasts = []
+    for n in range(speeds):
+        f = fast * 2**n
+        fast_ema, slow_ema = ema(data, f), ema(data, 4 * f)
+        if fast_ema is None or slow_ema is None:
+            return None
+        forecasts.append((fast_ema - slow_ema) / sigma * EWMAC_SCALARS.get(f, 5.3))
+    combined = sum(forecasts) / len(forecasts) * 1.2  # diversification multiplier across speeds
+    return max(-20.0, min(20.0, combined))
+
+
+def realized_volatility(values: Sequence[Number], periods_per_year: float, window: int = 60) -> float | None:
+    """Annualized standard deviation of simple returns over the last `window` bars."""
+    data = _floats(values[-(window + 1) :])
+    if len(data) < 10:
+        return None
+    returns = [data[i] / data[i - 1] - 1 for i in range(1, len(data)) if data[i - 1]]
+    mean = sum(returns) / len(returns)
+    var = sum((r - mean) ** 2 for r in returns) / max(1, len(returns) - 1)
+    return math.sqrt(var * periods_per_year) if var > 0 else None

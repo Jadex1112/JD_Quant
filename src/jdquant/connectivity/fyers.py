@@ -13,6 +13,7 @@ import csv
 import hashlib
 import io
 import json
+import logging
 import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -32,15 +33,24 @@ from jdquant.connectivity.base import (
     VenueTimeout,
 )
 from jdquant.core.clock import Clock
+from jdquant.core.errors import PlatformError
 from jdquant.core.types import Side
 from jdquant.marketdata.instruments import AssetClass, Instrument, InstrumentStatus
 from jdquant.marketdata.records import Candle, Quote
-from jdquant.markets.india import IST, IndiaEquityFees, Product
-from jdquant.oms.orders import Order, OrderStatus, OrderType, ReportType, TimeInForce
+from jdquant.markets.india import IST, IndiaEquityFees, Product, fees_for
+from jdquant.oms.orders import Liquidity, Order, OrderStatus, OrderType, ReportType, TimeInForce
 
 API = "https://api-t1.fyers.in/api/v3"
 DATA = "https://api-t1.fyers.in/data"
 SYMBOL_MASTER = "https://public.fyers.in/sym_details/NSE_CM.csv"
+FUTURES_MASTERS = {
+    "MCX": "https://public.fyers.in/sym_details/MCX_COM_sym_master.json",
+    "CDS": "https://public.fyers.in/sym_details/NSE_CD_sym_master.json",
+}
+FUTURE_TICKER = re.compile(
+    r"^(?P<venue>[A-Z]+):(?P<root>[A-Z][A-Z0-9&_-]*?)(?P<yy>\d{2})(?P<mon>[A-Z]{3})FUT$"
+)
+FUTURES_HORIZON = timedelta(days=120)  # load the front contracts only
 
 RESOLUTIONS = {
     60: "1", 120: "2", 180: "3", 300: "5", 600: "10", 900: "15", 1200: "20",
@@ -54,6 +64,7 @@ CANCELLED, FILLED, TRANSIT, REJECTED, PENDING, EXPIRED = 1, 2, 4, 5, 6, 7
 COL_NAME, COL_TYPE, COL_LOT, COL_TICK, COL_TICKER = 1, 2, 3, 4, 9
 AUTH_ERROR_CODES = {-8, -15, -16, -17, -300}
 S = OrderStatus
+log = logging.getLogger(__name__)
 
 
 def _d(value: Any) -> Decimal:
@@ -77,7 +88,7 @@ def token_expiry(token: str) -> datetime | None:
 
 class FyersAdapter(VenueAdapter):
     venue = "FYERS"
-    markets = ("NSE",)
+    markets = ("NSE", "MCX")
     supports_replace = True
     requires_login = True
 
@@ -102,6 +113,7 @@ class FyersAdapter(VenueAdapter):
         self.environment = environment
         self.product = product
         self.fees = IndiaEquityFees(product=product)
+        self.lookup: Callable[[str], Instrument] | None = None  # the platform's instrument registry
         self.access_token: str | None = None
         self.refresh_token: str | None = None
         self.pin: str | None = None
@@ -266,7 +278,16 @@ class FyersAdapter(VenueAdapter):
         return [Balance("INR", free, locked)]
 
     def fetch_instruments(self) -> list[Instrument]:
-        """NSE equities from Fyers' public symbol master."""
+        """NSE equities and ETFs, plus front MCX commodity and NSE currency futures when available."""
+        instruments = self._cash_instruments()
+        for segment, url in FUTURES_MASTERS.items():
+            try:
+                instruments += self._futures(segment, url)
+            except VenueError as exc:  # a segment the account or data plan lacks must not block equities
+                log.warning("Fyers %s symbol master unavailable: %s", segment, exc)
+        return instruments
+
+    def _cash_instruments(self) -> list[Instrument]:
         try:
             response = self._http.get(SYMBOL_MASTER)
         except httpx.HTTPError as exc:
@@ -285,11 +306,13 @@ class FyersAdapter(VenueAdapter):
             except ArithmeticError:
                 continue
             symbol = ticker.split(":", 1)[1]
+            name = row[COL_NAME].upper()
+            etf = "ETF" in name or symbol.endswith("BEES-EQ")  # includes gold and silver ETFs
             instruments.append(
                 Instrument(
                     venue="NSE",
                     symbol=symbol,
-                    asset_class=AssetClass.EQUITY,
+                    asset_class=AssetClass.ETF if etf else AssetClass.EQUITY,
                     base_asset=symbol.removesuffix("-EQ"),
                     quote_asset="INR",
                     tick_size=tick,
@@ -300,6 +323,57 @@ class FyersAdapter(VenueAdapter):
                 )
             )
         return instruments
+
+    def _futures(self, segment: str, url: str) -> list[Instrument]:
+        """Front futures from a JSON symbol master (a dict of contracts keyed by ticker).
+
+        Quantity units follow the broker convention: MCX orders are in lots, so one unit of quantity is one
+        lot worth `qtyMultiplier` units of the quoted price; NSE currency orders are in units, in multiples
+        of the lot. Either way notional = quantity × price × contract_multiplier.
+        """
+        try:
+            response = self._http.get(url)
+        except httpx.HTTPError as exc:
+            raise VenueError("VENUE_UNAVAILABLE", f"{segment} symbol master download failed: {exc}") from exc
+        if response.status_code != 200:
+            raise VenueError("VENUE_UNAVAILABLE", f"{segment} symbol master returned {response.status_code}")
+        try:
+            contracts = response.json()
+        except ValueError:
+            raise VenueError("VENUE_UNAVAILABLE", f"{segment} symbol master is not JSON") from None
+        now, out = self._clock.now(), []
+        for item in contracts.values() if isinstance(contracts, dict) else contracts:
+            ticker = str(item.get("symTicker") or "")
+            match = FUTURE_TICKER.match(ticker)
+            if item.get("optType", "XX") != "XX" or match is None:
+                continue  # options and anything that is not a plain future
+            try:
+                expiry = datetime.fromtimestamp(int(float(item["expiryDate"])), UTC)
+                multiplier, tick = _d(item.get("qtyMultiplier") or 1), _d(item.get("tickSize") or "0.05")
+            except (KeyError, ValueError, ArithmeticError):
+                continue
+            if not now < expiry <= now + FUTURES_HORIZON or multiplier <= 0:
+                continue
+            venue, symbol, root = match["venue"], ticker.split(":", 1)[1], match["root"]
+            mcx = segment == "MCX"
+            out.append(
+                Instrument(
+                    venue=venue,
+                    symbol=symbol,
+                    asset_class=AssetClass.COMMODITY if mcx else AssetClass.FX,
+                    base_asset=root,
+                    quote_asset="INR",
+                    tick_size=tick,
+                    lot_size=Decimal(1) if mcx else multiplier,
+                    min_quantity=Decimal(1) if mcx else multiplier,
+                    contract_multiplier=multiplier if mcx else Decimal(1),
+                    status=InstrumentStatus.ACTIVE,
+                    aliases=(("FYERS", ticker),),
+                    expiry=expiry,
+                    underlying=root,
+                )
+            )
+        return out
 
     def fetch_quote(self, instrument: Instrument) -> Quote | None:
         body = self._request("GET", f"{DATA}/quotes", params={"symbols": instrument.instrument_id})
@@ -377,7 +451,7 @@ class FyersAdapter(VenueAdapter):
                 "qty": _num(order.quantity),
                 "type": ORDER_TYPES[order.order_type],
                 "side": 1 if order.side is Side.BUY else -1,
-                "productType": self.product.value,
+                "productType": self._product_for(order.instrument_id),
                 "limitPrice": _num(order.limit_price) if order.limit_price is not None else 0,
                 "stopPrice": _num(order.stop_price) if order.stop_price is not None else 0,
                 "validity": VALIDITY[order.time_in_force],
@@ -454,6 +528,25 @@ class FyersAdapter(VenueAdapter):
         for order in working:
             self._reconcile_from_book(order)
 
+    def _product_for(self, instrument_id: str) -> str:
+        """Delivery (CNC) exists only for cash equities; futures carry overnight as MARGIN."""
+        if _is_derivative(instrument_id) and self.product is Product.CNC:
+            return "MARGIN"
+        return self.product.value
+
+    def _estimate_fee(self, order: Order, quantity: Decimal, price: Decimal) -> Decimal:
+        instrument = None
+        if self.lookup is not None:
+            try:
+                instrument = self.lookup(order.instrument_id)
+            except PlatformError:
+                instrument = None
+        if instrument is None:
+            return self.fees.breakdown(order.side, quantity * price)["total"]
+        return fees_for(instrument, self.product).fee(
+            instrument, order.side, quantity, price, Liquidity.UNKNOWN
+        )
+
     def _load_book(self) -> None:
         body = self._request("GET", f"{API}/orders")
         self._book = {str(o.get("id")): o for o in body.get("orderBook") or []}
@@ -486,7 +579,7 @@ class FyersAdapter(VenueAdapter):
         if filled > prev_filled and avg > 0:
             delta = filled - prev_filled
             price = (avg * filled - prev_avg * prev_filled) / delta
-            fee = self.fees.breakdown(order.side, delta * price)["total"]  # Fyers reports no per-fill charges
+            fee = self._estimate_fee(order, delta, price)  # Fyers reports no per-fill charges
             self.emit_fill(
                 order,
                 trade_id=f"{venue_id}:{filled}",
@@ -502,6 +595,10 @@ class FyersAdapter(VenueAdapter):
             self.emit(ReportType.CANCELED, order)
         elif status == EXPIRED:
             self.emit(ReportType.EXPIRED, order, reason="expired")
+
+
+def _is_derivative(instrument_id: str) -> bool:
+    return instrument_id.startswith("MCX:") or instrument_id.endswith("FUT")
 
 
 def _tag(client_order_id: str) -> str:

@@ -11,10 +11,10 @@ from jdquant.connectivity.router import AccountRouter
 from jdquant.core.clock import Clock, SystemClock
 from jdquant.core.events import EventBus
 from jdquant.core.ids import UuidIds
-from jdquant.execution.simulator import FillTiming, SimulatedVenue, VenueFees
+from jdquant.execution.simulator import FillTiming, SimulatedVenue
 from jdquant.marketdata.cache import MarketDataCache
 from jdquant.marketdata.instruments import AssetClass, Instrument, InstrumentRegistry
-from jdquant.markets.india import IndiaEquityFees
+from jdquant.markets.india import MarketFees
 from jdquant.oms.manager import OrderManager
 from jdquant.persistence.journal import Journal
 from jdquant.persistence.recovery import RecoveryReport, recover
@@ -104,7 +104,7 @@ def build_paper_platform(
         registry.add(instrument)
     market = MarketDataCache(clock, bus)
     risk = RiskEngine(clock, bus, registry, market, [default_risk_profile()], ids=ids)
-    fees = VenueFees(by_venue=(("NSE", IndiaEquityFees()),))
+    fees = MarketFees()  # Indian charges for NSE/MCX/currency fills, flat bps elsewhere
     venue = SimulatedVenue("PAPER", clock, registry, market, fill_timing=FillTiming.IMMEDIATE, fees=fees)
     positions = PositionEngine(bus, registry)
     trading = TradingEngine(clock, bus, positions, ids=ids, single_user=single_user)

@@ -1,8 +1,13 @@
-"""The single strategy the autopilot deploys.
+"""The strategies the autopilot deploys.
 
-Research, paper trading and live trading all run this class with the same parameters, so what was
-backtested is exactly what trades. It is long-only (Indian cash equities cannot be shorted overnight),
-sizes each entry from its allocated capital, and applies a protective stop (fixed and optionally trailing).
+Research, paper trading and live trading all run these classes with the same parameters, so what was
+backtested is exactly what trades.
+
+- `AutopilotStrategy` trades one instrument from a single signal. It is long-only unless the instrument
+  can be shorted (futures), sizes positions by volatility within its allocated capital the way systematic
+  funds size risk, and applies protective stops.
+- `RotationStrategy` trades a basket: every few bars it ranks the instruments and holds the best few
+  (cross-sectional momentum) or the most oversold quality names (short-term reversal).
 """
 
 from __future__ import annotations
@@ -12,13 +17,15 @@ from decimal import ROUND_FLOOR, Decimal
 
 from jdquant.core.errors import PlatformError
 from jdquant.marketdata.records import Candle
-from jdquant.markets.india import IST, NseCalendar
+from jdquant.markets.sessions import session_for
 from jdquant.strategy.base import Param, Strategy
 from jdquant.strategy.indicators import (
     bollinger,
     donchian,
+    ewmac_forecast,
     macd,
     rate_of_change,
+    realized_volatility,
     rsi,
     sma,
     supertrend,
@@ -27,78 +34,104 @@ from jdquant.strategy.indicators import (
 
 SIGNALS = (
     "ma_cross", "rsi", "bollinger", "donchian", "ml",
-    "momentum", "macd", "supertrend", "rsi_trend", "volume_breakout", "orb",
+    "momentum", "macd", "supertrend", "rsi_trend", "volume_breakout", "orb", "ewmac",
 )  # fmt: skip
+# Signals whose bearish state is a genuine short signal; mean-reversion "exits" are not.
+SHORTABLE = ("ma_cross", "macd", "supertrend", "momentum", "ewmac", "donchian", "ml", "orb")
 INTRADAY_ONLY = ("orb",)
-CALENDAR = NseCalendar()
+
+COMMON = {
+    "capital": Param(Decimal, "100000", min=Decimal(0), description="capital allocated, quote currency"),
+    "vol_target": Param(
+        Decimal, "0", min=Decimal(0), max=Decimal(2),
+        description="annualized volatility per position; smaller positions in wilder markets (0 disables)",
+    ),
+    "bars_per_year": Param(int, 248, min=1, max=1_000_000, description="bars per year for this market"),
+    "intraday": Param(bool, False, description="exit before the session's intraday cutoff; no late entries"),
+    "trade_after": Param(str, "", description="ISO time; bars closing earlier only warm up"),
+}  # fmt: skip
+
+
+def volatility_scale(closes, vol_target: Decimal, bars_per_year: int) -> Decimal:
+    """Fraction of capital to deploy so the position runs at about `vol_target` (at most 1: no leverage)."""
+    if vol_target <= 0:
+        return Decimal(1)
+    vol = realized_volatility(closes, bars_per_year)
+    if not vol:
+        return Decimal(1)
+    return min(Decimal(1), vol_target / Decimal(str(vol)))
 
 
 class AutopilotStrategy(Strategy):
     name = "autopilot"
-    version = "1.1.0"
-    description = "AI-selected long-only signal with capital-based sizing and a protective stop."
+    version = "1.2.0"
+    description = (
+        "AI-selected signal with volatility-based sizing, protective stops and shorting for futures."
+    )
     parameters = {
         "signal": Param(str, "ma_cross", description=f"one of {', '.join(SIGNALS)}"),
-        "fast": Param(int, 10, min=2, max=500, description="fast moving average (ma_cross)"),
-        "slow": Param(int, 30, min=3, max=500, description="slow moving average (ma_cross)"),
-        "period": Param(
-            int, 14, min=2, max=500, description="lookback (rsi, bollinger, donchian, momentum, ...)"
-        ),
+        "fast": Param(int, 10, min=2, max=500, description="fast average (ma_cross, macd, ewmac base speed)"),
+        "slow": Param(int, 30, min=3, max=500, description="slow moving average (ma_cross, macd)"),
+        "period": Param(int, 14, min=2, max=500, description="lookback (rsi, bollinger, donchian, ...)"),
         "trend": Param(int, 200, min=2, max=500, description="trend-filter moving average (rsi_trend)"),
         "signal_len": Param(int, 9, min=2, max=100, description="MACD signal-line length"),
         "lower": Param(Decimal, "30", min=Decimal(1), max=Decimal(99), description="RSI entry level"),
         "upper": Param(Decimal, "70", min=Decimal(1), max=Decimal(99), description="RSI exit level"),
         "k": Param(
-            Decimal,
-            "2",
-            min=Decimal("0.5"),
-            max=Decimal(5),
+            Decimal, "2", min=Decimal("0.5"), max=Decimal(5),
             description="Bollinger width, Supertrend ATR multiple, or volume z-score (volume_breakout)",
-        ),  # fmt: skip
+        ),
+        "forecast": Param(Decimal, "5", min=Decimal(0), max=Decimal(20), description="EWMAC entry forecast"),
         "model": Param(str, "", description="registered model name (ml)"),
         "threshold": Param(Decimal, "0.05", min=Decimal(0), max=Decimal("0.49"), description="ml band"),
-        "capital": Param(Decimal, "100000", min=Decimal(0), description="capital allocated, quote currency"),
         "stop_loss": Param(Decimal, "0.08", min=Decimal(0), max=Decimal("0.5"), description="0 disables"),
         "take_profit": Param(Decimal, "0", min=Decimal(0), max=Decimal(5), description="0 disables"),
         "trailing_stop": Param(
-            Decimal,
-            "0",
-            min=Decimal(0),
-            max=Decimal("0.5"),
-            description="exit this far below the high since entry",
+            Decimal, "0", min=Decimal(0), max=Decimal("0.5"), description="exit this far from the best price"
         ),
-        "intraday": Param(bool, False, description="exit before the NSE intraday cutoff; no late entries"),
-        "trade_after": Param(str, "", description="ISO time; bars closing earlier only warm up"),
-    }
+        "allow_short": Param(bool, False, description="sell short on bearish signals (futures only)"),
+        **COMMON,
+    }  # fmt: skip
 
     def on_init(self) -> None:
         p = self.ctx.params
         if p["signal"] not in SIGNALS:
             raise PlatformError("PARAMETER_INVALID", f"signal must be one of {SIGNALS}")
         self._trade_after = datetime.fromisoformat(p["trade_after"]) if p["trade_after"] else None
-        self._peaks: dict[str, Decimal] = {}  # highest close since entry, for the trailing stop
+        self._best: dict[str, Decimal] = {}  # best price since entry, for the trailing stop
 
     def on_bar(self, candle: Candle) -> None:
         if self._trade_after is not None and candle.close_ts < self._trade_after:
             return
-        instrument_id = candle.instrument_id
-        if self.ctx.open_orders(instrument_id):
+        i = candle.instrument_id
+        if self.ctx.open_orders(i):
             return
         p = self.ctx.params
-        position = self.ctx.position(instrument_id)
-        late = p["intraday"] and CALENDAR.past_intraday_cutoff(candle.close_ts)
+        position = self.ctx.position(i)
+        late = p["intraday"] and session_for(self.ctx.instrument(i)).past_intraday_cutoff(candle.close_ts)
+        view = self.decide(candle)
         if position > 0:
-            if late or self._stopped_out(instrument_id, candle.close) or self.decide(candle) == "exit":
-                self.ctx.sell(instrument_id, position)
+            if late or self._stopped_out(i, candle.close, 1) or view == "exit":
+                self.ctx.sell(i, position)
             return
-        self._peaks.pop(instrument_id, None)
-        if not late and self.decide(candle) == "enter":
-            quantity = self._size(instrument_id, candle.close)
+        if position < 0:
+            if late or self._stopped_out(i, candle.close, -1) or view == "enter":
+                self.ctx.buy(i, -position)
+            return
+        self._best.pop(i, None)
+        if late:
+            return
+        if view == "enter":
+            quantity = self._size(i, candle.close)
             if quantity > 0:
-                self.ctx.buy(instrument_id, quantity)
+                self.ctx.buy(i, quantity)
+        elif view == "exit" and p["allow_short"] and p["signal"] in SHORTABLE:
+            quantity = self._size(i, candle.close)
+            if quantity > 0:
+                self.ctx.sell(i, quantity)
 
     def decide(self, candle: Candle) -> str | None:
-        """'enter', 'exit' or None (no view) from the configured signal."""
+        """'enter' (bullish), 'exit' (bearish) or None (no view) from the configured signal."""
         p, i = self.ctx.params, candle.instrument_id
         close = float(candle.close)
         match p["signal"]:
@@ -142,12 +175,8 @@ class AutopilotStrategy(Strategy):
                     return None
                 return "enter" if change > float(p["threshold"]) else "exit" if change < 0 else None
             case "macd":
-                values = macd(
-                    self.ctx.closes(i, (p["slow"] + p["signal_len"]) * 4),
-                    p["fast"],
-                    p["slow"],
-                    p["signal_len"],
-                )
+                closes = self.ctx.closes(i, (p["slow"] + p["signal_len"]) * 4)
+                values = macd(closes, p["fast"], p["slow"], p["signal_len"])
                 if values is None:
                     return None
                 line, signal_line = values
@@ -155,15 +184,18 @@ class AutopilotStrategy(Strategy):
             case "supertrend":
                 window = self.ctx.candles(i, p["period"] * 10)
                 result = supertrend(
-                    [c.high for c in window],
-                    [c.low for c in window],
-                    [c.close for c in window],
-                    p["period"],
-                    float(p["k"]),
-                )
+                    [c.high for c in window], [c.low for c in window], [c.close for c in window],
+                    p["period"], float(p["k"]),
+                )  # fmt: skip
                 if result is None:
                     return None
                 return "enter" if result[0] else "exit"
+            case "ewmac":
+                forecast = ewmac_forecast(self.ctx.closes(i, p["fast"] * 16 + 60), p["fast"])
+                if forecast is None:
+                    return None
+                threshold = float(p["forecast"])
+                return "enter" if forecast > threshold else "exit" if forecast < -threshold else None
             case "rsi_trend":
                 # Buy a short, sharp dip only while the longer trend is up; sell into the bounce.
                 closes = self.ctx.closes(i, max(p["trend"], p["period"] * 5))
@@ -186,8 +218,9 @@ class AutopilotStrategy(Strategy):
                 return "enter" if close > channel[1] and surge else None
             case "orb":
                 # Opening-range breakout: the first `period` bars of the session set the range.
-                day = candle.open_ts.astimezone(IST).date()
-                session = [c for c in self.ctx.candles(i, 200) if c.open_ts.astimezone(IST).date() == day]
+                tz = session_for(self.ctx.instrument(i)).tz
+                day = candle.open_ts.astimezone(tz).date()
+                session = [c for c in self.ctx.candles(i, 200) if c.open_ts.astimezone(tz).date() == day]
                 if candle.interval_seconds >= 86400 or len(session) <= p["period"]:
                     return None
                 opening = session[: p["period"]]
@@ -195,21 +228,112 @@ class AutopilotStrategy(Strategy):
                 return "enter" if close > high else "exit" if close < low else None
         return None
 
-    def _stopped_out(self, instrument_id: str, price: Decimal) -> bool:
+    def _stopped_out(self, instrument_id: str, price: Decimal, direction: int) -> bool:
+        """Fixed stop from entry, trailing stop from the best price since entry, and take-profit."""
         p = self.ctx.params
         entry = self.ctx.entry_price(instrument_id)
         if entry <= 0:
             return False
-        if p["stop_loss"] > 0 and price <= entry * (1 - p["stop_loss"]):
+        move = (price - entry) / entry * direction  # positive when the position is winning
+        if p["stop_loss"] > 0 and move <= -p["stop_loss"]:
             return True
-        peak = max(self._peaks.get(instrument_id, entry), price)
-        self._peaks[instrument_id] = peak
-        if p["trailing_stop"] > 0 and price <= peak * (1 - p["trailing_stop"]):
+        best = self._best.get(instrument_id, entry)
+        best = max(best, price) if direction > 0 else min(best, price)
+        self._best[instrument_id] = best
+        if p["trailing_stop"] > 0 and (best - price) / best * direction >= p["trailing_stop"]:
             return True
-        return p["take_profit"] > 0 and price >= entry * (1 + p["take_profit"])
+        return p["take_profit"] > 0 and move >= p["take_profit"]
 
     def _size(self, instrument_id: str, price: Decimal) -> Decimal:
-        instrument = self.ctx.instrument(instrument_id)
-        lots = self.ctx.params["capital"] / (price * instrument.contract_multiplier) / instrument.lot_size
-        quantity = lots.to_integral_value(rounding=ROUND_FLOOR) * instrument.lot_size
-        return quantity if quantity >= instrument.min_quantity else Decimal(0)
+        p = self.ctx.params
+        scale = volatility_scale(self.ctx.closes(instrument_id, 61), p["vol_target"], p["bars_per_year"])
+        return whole_lots(self.ctx.instrument(instrument_id), p["capital"] * scale, price)
+
+
+def whole_lots(instrument, capital: Decimal, price: Decimal) -> Decimal:
+    lots = capital / (price * instrument.contract_multiplier) / instrument.lot_size
+    quantity = lots.to_integral_value(rounding=ROUND_FLOOR) * instrument.lot_size
+    return quantity if quantity >= instrument.min_quantity else Decimal(0)
+
+
+class RotationStrategy(Strategy):
+    """Cross-sectional selection across a basket, rebalanced on a fixed schedule (long-only).
+
+    momentum: hold the `hold` instruments with the best return over `lookback` bars, skipping the most
+      recent `skip` bars (short-term noise), and only those whose return is positive (absolute momentum).
+    reversal: hold the `hold` instruments that fell most over `lookback` bars while still above their
+      `trend`-bar average (oversold quality names), for one rebalance period.
+    """
+
+    name = "rotation"
+    version = "1.0.0"
+    description = "Cross-sectional momentum or short-term reversal across a basket, volatility-weighted."
+    parameters = {
+        "mode": Param(str, "momentum", description="momentum or reversal"),
+        "lookback": Param(int, 126, min=2, max=500, description="ranking window in bars"),
+        "skip": Param(int, 21, min=0, max=100, description="most recent bars ignored by momentum"),
+        "hold": Param(int, 3, min=1, max=50, description="instruments held at once"),
+        "rebalance": Param(int, 21, min=1, max=500, description="bars between rebalances"),
+        "trend": Param(int, 200, min=2, max=500, description="quality filter average (reversal)"),
+        **COMMON,
+    }
+
+    def on_init(self) -> None:
+        p = self.ctx.params
+        if p["mode"] not in ("momentum", "reversal"):
+            raise PlatformError("PARAMETER_INVALID", "mode must be momentum or reversal")
+        self._trade_after = datetime.fromisoformat(p["trade_after"]) if p["trade_after"] else None
+        self._trigger = sorted(self.ctx.instruments)[-1]  # rebalance once all of the bar's prices are in
+        self._bars = 0
+
+    def on_bar(self, candle: Candle) -> None:
+        if candle.instrument_id != self._trigger:
+            return
+        if self._trade_after is not None and candle.close_ts < self._trade_after:
+            return
+        self._bars += 1
+        if (self._bars - 1) % self.ctx.params["rebalance"] or self.ctx.open_orders():
+            return
+        self.rebalance()
+
+    def rank(self) -> list[str]:
+        p = self.ctx.params
+        scores: dict[str, float] = {}
+        for i in self.ctx.instruments:
+            closes = self.ctx.closes(i, max(p["lookback"] + p["skip"] + 1, p["trend"]))
+            if p["mode"] == "momentum":
+                if len(closes) < p["lookback"] + p["skip"] + 1:
+                    continue
+                window = closes[: len(closes) - p["skip"]] if p["skip"] else closes
+                change = rate_of_change(window, p["lookback"])
+                if change is not None and change > 0:
+                    scores[i] = change
+            else:
+                change = rate_of_change(closes, p["lookback"])
+                trend = sma(closes, p["trend"])
+                if change is not None and trend is not None and change < 0 and float(closes[-1]) > trend:
+                    scores[i] = -change  # the bigger the drop, the higher the rank
+        return sorted(scores, key=scores.get, reverse=True)[: p["hold"]]
+
+    def rebalance(self) -> None:
+        p = self.ctx.params
+        chosen = set(self.rank())
+        slot = p["capital"] / p["hold"]
+        for i in sorted(self.ctx.instruments):
+            position = self.ctx.position(i)
+            if i not in chosen:
+                if position > 0:
+                    self.ctx.sell(i, position)
+                continue
+            closes = self.ctx.closes(i, 61)
+            if not closes:
+                continue
+            scale = volatility_scale(closes, p["vol_target"], p["bars_per_year"])
+            target = whole_lots(self.ctx.instrument(i), slot * scale, closes[-1])
+            delta = target - position
+            if target and abs(delta) < target * Decimal("0.2"):
+                continue  # close enough: avoid paying costs to trim small differences
+            if delta > 0:
+                self.ctx.buy(i, delta)
+            elif delta < 0:
+                self.ctx.sell(i, -delta)

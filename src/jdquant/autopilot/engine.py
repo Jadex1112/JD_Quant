@@ -2,9 +2,13 @@
 
 Each cycle it loads history for the configured universe, runs walk-forward research, and acts on the result:
 new winners start trading on the autopilot's own paper account, deployments whose edge no longer holds up
-are closed out, and paper deployments with a clean track record move to the live broker account — but only
-while a person has armed live trading with a capital cap. Every action is recorded as a decision with its
+are closed out, and paper deployments with a clean track record move to a live broker account — but only
+while a person has armed that account with a capital cap. Every action is recorded as a decision with its
 reasons. Risk limits and kill switches apply to everything it does, exactly as for manual trading.
+
+It runs the book the way a systematic fund would: positions sized by volatility, one strategy per
+instrument, futures rolled before expiry, and the whole book cut back to cash when its drawdown from the
+peak exceeds a limit.
 """
 
 from __future__ import annotations
@@ -28,9 +32,11 @@ from jdquant.autopilot.research import (
     ResearchConfig,
     ResearchResult,
     research,
+    strategy_name,
     strategy_parameters,
 )
-from jdquant.autopilot.strategy import AutopilotStrategy
+from jdquant.autopilot.strategy import AutopilotStrategy, RotationStrategy
+from jdquant.connectivity.connections import markets_of
 from jdquant.core.errors import PlatformError, ValidationError
 from jdquant.marketdata.instruments import Instrument
 from jdquant.marketdata.records import Candle
@@ -50,6 +56,8 @@ KIND = "autopilot"
 DECISIONS = "autopilot_decision"
 RUNS = "autopilot_run"
 ACTIVE = (DeploymentState.RUNNING, DeploymentState.PAUSED, DeploymentState.READY)
+VERSIONS = {"autopilot": AutopilotStrategy.version, "rotation": RotationStrategy.version}
+DEFAULT_FX = {"INR": Decimal(1), "USDT": Decimal(85), "USDC": Decimal(85), "USD": Decimal(85)}
 
 
 @dataclass
@@ -76,9 +84,19 @@ class AutopilotConfig:
     min_paper_days: int = 10
     min_paper_trades: int = 2
     explain_with_claude: bool = True
+    vol_target: Decimal = Decimal("0.2")  # annualized volatility each position is sized to
+    max_participation: float = 0.01  # largest position as a share of daily traded value (real data only)
+    portfolio_drawdown_limit: float = 0.10  # of the budget: cut the whole book to cash beyond this
+    halt_cooldown_days: int = 5
+    roll_days: int = 3  # roll futures this many days before expiry
+    # INR per unit of other quote currencies, to size crypto in USDT from an INR budget. Update as rates move.
+    fx_rates: dict[str, Decimal] = field(default_factory=lambda: dict(DEFAULT_FX))
 
-    def research_config(self) -> ResearchConfig:
+    def research_config(self, real_data: bool = True) -> ResearchConfig:
         return ResearchConfig(
+            vol_target=self.vol_target,
+            max_participation=self.max_participation if real_data else 0.0,
+            fx_rates={**DEFAULT_FX, **self.fx_rates},
             interval_seconds=self.interval_seconds,
             capital=self.capital,
             stop_loss=self.stop_loss,
@@ -97,12 +115,21 @@ class AutopilotConfig:
 
 
 @dataclass
+class ArmedAccount:
+    account_id: str
+    capital_cap: Decimal  # in the budget currency (INR)
+    armed_by: str
+    armed_at: datetime
+    allow_futures: bool = False  # futures quantities are in lots; confirm with a test trade first
+
+
+@dataclass
 class LiveArming:
-    armed: bool = False
-    account_id: str | None = None
-    capital_cap: Decimal = Decimal(0)
-    armed_by: str | None = None
-    armed_at: datetime | None = None
+    accounts: dict[str, ArmedAccount] = field(default_factory=dict)
+
+    @property
+    def armed(self) -> bool:
+        return bool(self.accounts)
 
 
 @dataclass
@@ -121,16 +148,27 @@ class Managed:
     source_deployment: str | None = None  # the paper deployment a live one was promoted from
     status: str = "ACTIVE"  # ACTIVE | CLOSING | RETIRED
     peak_pnl: Decimal = Decimal(0)
-    pnl: Decimal = Decimal(0)
+    pnl: Decimal = Decimal(0)  # in the budget currency
     ready_for_live_noted: bool = False
     live_deployment: str | None = None
+    account_id: str = PAPER_AI_ACCOUNT
+    universe_id: str = ""  # the universe entry it came from (e.g. MCX:GOLDM1! for a rolling future)
+    instruments: list[str] = field(default_factory=list)  # a basket for rotation strategies
+    currency: str = "INR"  # quote currency of its instruments
+    strategy: str = "autopilot"
+    rolled_to: str | None = None
+
+    def __post_init__(self) -> None:
+        self.instruments = self.instruments or [self.instrument_id]
+        self.universe_id = self.universe_id or self.instrument_id
 
 
 @dataclass
 class Decision:
     decision_id: str
     at: datetime
-    kind: str  # DEPLOY | KEEP | RETIRE | PROMOTE | READY_FOR_LIVE | SKIP | ARM | DISARM | CYCLE | ERROR
+    # DEPLOY | KEEP | RETIRE | ROLL | HALT | PROMOTE | READY_FOR_LIVE | SKIP | ARM | DISARM | CYCLE | ERROR
+    kind: str
     title: str
     reasons: list[str] = field(default_factory=list)
     instrument_id: str | None = None
@@ -181,14 +219,22 @@ class Autopilot:
         self._summarizer = summarizer
         self.calendar = calendar or NseCalendar()
         self.config = decode(AutopilotConfig, store.get(KIND, "config") or encode(AutopilotConfig()))
-        self.live = decode(LiveArming, store.get(KIND, "live") or encode(LiveArming()))
+        self.live = self._load_live(store.get(KIND, "live") or {})
         self.managed: dict[str, Managed] = {
             m.deployment_id: m for m in (decode(Managed, d) for d in store.all(f"{KIND}_managed"))
         }
+        for m in self.managed.values():  # records written before accounts were tracked
+            deployment = platform.trading.deployments.get(m.deployment_id)
+            if deployment is not None and m.mode == "LIVE" and m.account_id == PAPER_AI_ACCOUNT:
+                m.account_id = deployment.account_id
         self.last_run_at: datetime | None = None
         state = store.get(KIND, "state") or {}
         if state.get("last_run_at"):
             self.last_run_at = datetime.fromisoformat(state["last_run_at"])
+        self.peaks: dict[str, Decimal] = {k: Decimal(v) for k, v in state.get("peaks", {}).items()}
+        self.halted_until: dict[str, datetime] = {
+            k: datetime.fromisoformat(v) for k, v in state.get("halted_until", {}).items()
+        }
         self.progress: dict[str, Any] = {"running": False}
         self._decision_seq = store.query("SELECT COUNT(*) AS n FROM documents WHERE kind = ?", (DECISIONS,))[
             0
@@ -202,6 +248,76 @@ class Autopilot:
                     TradingAccount(PAPER_AI_ACCOUNT, "AI paper", "PAPER", AccountMode.PAPER, "INR")
                 )
 
+    @staticmethod
+    def _load_live(doc: dict[str, Any]) -> LiveArming:
+        if "accounts" in doc:
+            return decode(LiveArming, doc)
+        if doc.get("armed") and doc.get("account_id"):  # the single-account format of earlier versions
+            armed = ArmedAccount(
+                doc["account_id"],
+                Decimal(doc["capital_cap"]),
+                doc.get("armed_by") or "unknown",
+                datetime.fromisoformat(doc["armed_at"]),
+            )
+            return LiveArming({armed.account_id: armed})
+        return LiveArming()
+
+    def _save_state(self) -> None:
+        self._store.put(
+            KIND,
+            "state",
+            {
+                "last_run_at": self.last_run_at.isoformat() if self.last_run_at else None,
+                "peaks": {k: str(v) for k, v in self.peaks.items()},
+                "halted_until": {k: v.isoformat() for k, v in self.halted_until.items()},
+            },
+        )
+
+    # ---- universe -----------------------------------------------------------------------------
+
+    def resolve(self, universe_id: str) -> Instrument | None:
+        """An instrument, or for `VENUE:ROOT1!` the front futures contract not about to expire."""
+        if not universe_id.endswith("1!"):
+            try:
+                return self._p.instruments.get(universe_id)
+            except PlatformError:
+                return None
+        venue, root = universe_id[:-2].split(":", 1)
+        return self._front(venue, root)
+
+    def _front(self, venue: str, root: str, after: datetime | None = None) -> Instrument | None:
+        cutoff = max(
+            after or self._p.clock.now(), self._p.clock.now() + timedelta(days=self.config.roll_days)
+        )
+        contracts = [
+            i
+            for i in self._p.instruments.search()
+            if i.venue == venue and i.underlying == root and i.expiry is not None and i.expiry > cutoff
+        ]
+        return min(contracts, key=lambda i: i.expiry) if contracts else None
+
+    def universe_options(self) -> list[dict[str, Any]]:
+        """What the universe may contain: instruments by asset group, futures as continuous front months."""
+        from jdquant.markets.sessions import asset_group
+
+        options, roots = [], set()
+        for i in self._p.instruments.search():
+            if i.is_future:
+                roots.add((i.venue, i.underlying))
+                continue
+            options.append({"id": i.instrument_id, "label": i.instrument_id, "group": asset_group(i)})
+        for venue, root in sorted(roots):
+            front = self._front(venue, root)
+            if front is not None:
+                options.append(
+                    {
+                        "id": f"{venue}:{root}1!",
+                        "label": f"{venue}:{root} front month ({front.symbol})",
+                        "group": f"{asset_group(front)} futures",
+                    }
+                )
+        return sorted(options, key=lambda o: (o["group"], o["id"]))
+
     # ---- configuration ------------------------------------------------------------------------
 
     def update_config(self, changes: dict[str, Any], actor: str) -> AutopilotConfig:
@@ -214,10 +330,11 @@ class Autopilot:
             ) from None
         problems = []
         for instrument_id in config.universe:
-            try:
-                self._p.instruments.get(instrument_id)
-            except PlatformError:
+            if self.resolve(instrument_id) is None:
                 problems.append({"field": "universe", "message": f"unknown instrument {instrument_id}"})
+        for currency, rate in config.fx_rates.items():
+            if rate <= 0:
+                problems.append({"field": "fx_rates", "message": f"{currency} rate must be positive"})
         if config.capital <= 0:
             problems.append({"field": "capital", "message": "must be positive"})
         if not 0 < config.max_weight <= 1:
@@ -233,7 +350,9 @@ class Autopilot:
         self._audit.record(actor=actor, action="autopilot.configure", category="CONFIGURATION", data=changes)
         return config
 
-    def arm_live(self, account_id: str, capital_cap: Decimal, actor: str) -> LiveArming:
+    def arm_live(
+        self, account_id: str, capital_cap: Decimal, actor: str, *, allow_futures: bool = False
+    ) -> LiveArming:
         account = self._p.trading.get_account(account_id)
         if account.mode is not AccountMode.LIVE:
             raise PlatformError("ACCOUNT_NOT_LIVE", "choose a live broker account")
@@ -241,29 +360,39 @@ class Autopilot:
             raise ValidationError(
                 "CAPITAL_CAP_INVALID", [{"field": "capital_cap", "message": "must be positive"}]
             )
-        self.live = LiveArming(True, account_id, capital_cap, actor, self._p.clock.now())
+        self.live.accounts[account_id] = ArmedAccount(
+            account_id, capital_cap, actor, self._p.clock.now(), allow_futures
+        )
         self._store.put(KIND, "live", encode(self.live))
+        reasons = ["Paper deployments that meet the track-record rules can now be promoted to real orders."]
+        if allow_futures:
+            reasons.append(
+                "Futures are included: quantities are in lots — confirm one lot with a test trade."
+            )
         self._decide(
-            "ARM",
-            f"Live trading armed on {account_id} with a cap of {capital_cap:,}",
-            ["Paper deployments that meet the track-record rules can now be promoted to real orders."],
-            actor=actor,
+            "ARM", f"Live trading armed on {account_id} with a cap of {capital_cap:,}", reasons, actor=actor
         )
         return self.live
 
-    def disarm_live(self, actor: str, *, flatten: bool = True) -> LiveArming:
-        """Stop promoting and close out every live autopilot deployment."""
-        self.live = LiveArming()
+    def disarm_live(self, actor: str, *, account_id: str | None = None, flatten: bool = True) -> LiveArming:
+        """Stop promoting and close out the live autopilot deployments (one account or all)."""
+        targets = [account_id] if account_id else list(self.live.accounts)
+        for target in targets:
+            self.live.accounts.pop(target, None)
         self._store.put(KIND, "live", encode(self.live))
         closed = []
         with self._p.lock:
-            for m in self.managed.values():
-                if m.mode == "LIVE" and m.status == "ACTIVE":
+            for m in list(self.managed.values()):
+                if (
+                    m.mode == "LIVE"
+                    and m.status == "ACTIVE"
+                    and (account_id is None or m.account_id == account_id)
+                ):
                     self._close(m, "live trading disarmed", flatten=flatten)
                     closed.append(m.instrument_id)
         self._decide(
             "DISARM",
-            "Live trading disarmed",
+            f"Live trading disarmed{f' on {account_id}' if account_id else ''}",
             [f"Closed live deployments: {', '.join(closed)}" if closed else "No live deployments were open."],
             actor=actor,
         )
@@ -345,7 +474,7 @@ class Autopilot:
         finally:
             run.finished_at = self._p.clock.now()
             self.last_run_at = run.started_at
-            self._store.put(KIND, "state", {"last_run_at": run.started_at.isoformat()})
+            self._save_state()
             self._store.put(RUNS, run.run_id, encode(run))
             self.progress = {"running": False, "run_id": run.run_id}
             self._cycle_lock.release()
@@ -355,7 +484,15 @@ class Autopilot:
         config = self.config
         if not config.universe:
             raise PlatformError("AUTOPILOT_NO_UNIVERSE", "choose the instruments the autopilot may trade")
-        instruments = [self._p.instruments.get(i) for i in config.universe]
+        instruments, unresolved = [], {}
+        self._universe_of: dict[str, str] = {}
+        for universe_id in config.universe:
+            instrument = self.resolve(universe_id)
+            if instrument is None:
+                unresolved[universe_id] = "no tradable contract (expired or not loaded)"
+                continue
+            instruments.append(instrument)
+            self._universe_of[instrument.instrument_id] = universe_id
         candles, sources = {}, set()
         for instrument in instruments:
             series, source = self._load(instrument)
@@ -366,7 +503,9 @@ class Autopilot:
         def progress(done: int, total: int, message: str) -> None:
             self.progress.update(done=done, total=total, message=message)
 
-        result = research(instruments, candles, config.research_config(), progress=progress)
+        real = sources == {"broker history"}
+        result = research(instruments, candles, config.research_config(real_data=real), progress=progress)
+        result.skipped.update(unresolved)
         run.trials, run.skipped = result.trials, result.skipped
         ranked = sorted(result.evaluations, key=lambda e: e.score, reverse=True)
         run.leaderboard = [e.summary() for e in ranked[:60]]
@@ -431,7 +570,7 @@ class Autopilot:
         for m in list(self.managed.values()):
             if m.status != "ACTIVE" or m.mode != "PAPER":
                 continue
-            if m.instrument_id not in self.config.universe:
+            if m.universe_id not in self.config.universe and not m.universe_id.startswith("PORTFOLIO:"):
                 self._retire(m, ["the instrument was removed from the autopilot universe"], run)
                 continue
             e = by_key.get((m.instrument_id, m.candidate))
@@ -452,16 +591,20 @@ class Autopilot:
                 self._retire(m, ["its edge no longer holds up on fresh data:", *e.reasons], run)
 
     def _deploy(self, result: ResearchResult, candles: dict[str, list[Candle]], run: Run) -> None:
-        active = {
-            m.instrument_id for m in self.managed.values() if m.status == "ACTIVE" and m.mode == "PAPER"
-        }
-        used = sum(
-            (m.capital for m in self.managed.values() if m.status == "ACTIVE" and m.mode == "PAPER"),
-            Decimal(0),
-        )
+        if self._halted("PAPER"):
+            self._decide(
+                "SKIP",
+                "New paper deployments paused after a portfolio drawdown halt",
+                [f"resumes after {self.halted_until['PAPER']:%Y-%m-%d %H:%M} UTC"],
+                run_id=run.run_id,
+            )
+            return
+        live_paper = [m for m in self.managed.values() if m.status == "ACTIVE" and m.mode == "PAPER"]
+        covered = {i for m in live_paper for i in m.instruments}
+        used = sum((m.capital for m in live_paper), Decimal(0))
         for selection in result.selections:
             e = selection.evaluation
-            if e.instrument_id in active:
+            if covered & set(e.instruments):
                 continue  # one autopilot strategy per instrument; the incumbent passed review
             capital = min(selection.capital, self.config.capital - used)
             if capital <= 0:
@@ -478,11 +621,11 @@ class Autopilot:
                 (x for x in result.evaluations if x.passed and x.instrument_id == e.instrument_id),
                 key=lambda x: x.score,
                 reverse=True,
-            )
+            ) or [e]
             managed = None
             for candidate in alternatives:
                 try:
-                    managed = self._start_paper(candidate, capital, candles[e.instrument_id], run)
+                    managed = self._start_paper(candidate, capital, candles, run)
                 except PlatformError as exc:
                     self._decide(
                         "SKIP",
@@ -499,6 +642,7 @@ class Autopilot:
             if managed is None:
                 continue
             used += capital
+            covered |= set(e.instruments)
             self._decide(
                 "DEPLOY",
                 f"Paper trading {e.candidate.label} on {e.instrument_id} with {capital:,}",
@@ -508,25 +652,26 @@ class Autopilot:
                 run_id=run.run_id,
             )
 
-    def _start_paper(self, e: Evaluation, capital: Decimal, series: list[Candle], run: Run) -> Managed:
-        params = strategy_parameters(e.candidate, capital, self.config.research_config())
+    def _start_paper(
+        self, e: Evaluation, capital: Decimal, candles: dict[str, list[Candle]], run: Run
+    ) -> Managed:
+        """Deploy on the AI paper account; `capital` is in the budget currency."""
+        lead = self._p.instruments.get(e.instruments[0])
+        research_config = self.config.research_config()
+        params = strategy_parameters(
+            e.candidate, research_config.capital_for(lead, capital), research_config, lead
+        )
         model = None
         if e.candidate.signal == "ml":
-            model = self._register_model(e.candidate, e.instrument_id, series, run)
+            model = self._register_model(e.candidate, e.instrument_id, candles[e.instrument_id], run)
             params["model"] = model
-        trading = self._p.trading
-        deployment = trading.create_deployment(
-            strategy_name="autopilot",
-            strategy_version=AutopilotStrategy.version,
-            account_id=PAPER_AI_ACCOUNT,
-            parameters=params,
-            instruments=[e.instrument_id],
-            created_by=AUTOPILOT,
-            bar_interval_seconds=self.config.interval_seconds,
+        name = strategy_name(e.candidate)
+        deployment = self._launch(name, PAPER_AI_ACCOUNT, params, e.instruments, AUTOPILOT)
+        universe_id = (
+            e.instrument_id
+            if e.is_portfolio
+            else getattr(self, "_universe_of", {}).get(e.instrument_id, e.instrument_id)
         )
-        trading.approve(deployment.deployment_id, AUTOPILOT)
-        trading.start(deployment.deployment_id)
-        self._sync(deployment)
         managed = Managed(
             deployment.deployment_id,
             e.instrument_id,
@@ -539,9 +684,31 @@ class Autopilot:
             self._p.clock.now(),
             expected=e.validation,
             model=model,
+            universe_id=universe_id,
+            instruments=list(e.instruments),
+            currency=lead.quote_asset,
+            strategy=name,
         )
         self._save(managed)
         return managed
+
+    def _launch(
+        self, strategy: str, account_id: str, params: dict[str, Any], instruments: list[str], approver: str
+    ):
+        trading = self._p.trading
+        deployment = trading.create_deployment(
+            strategy_name=strategy,
+            strategy_version=VERSIONS[strategy],
+            account_id=account_id,
+            parameters=params,
+            instruments=instruments,
+            created_by=AUTOPILOT,
+            bar_interval_seconds=self.config.interval_seconds,
+        )
+        trading.approve(deployment.deployment_id, approver)
+        trading.start(deployment.deployment_id)
+        self._sync(deployment)
+        return deployment
 
     def _register_model(
         self, candidate: Candidate, instrument_id: str, series: list[Candle], run: Run
@@ -565,15 +732,33 @@ class Autopilot:
             )
         return name
 
+    def _live_account_for(self, m: Managed) -> ArmedAccount | None:
+        """An armed account whose broker trades every instrument of `m` (and allows futures if needed)."""
+        needs_futures = any(self._p.instruments.get(i).is_future for i in m.instruments)
+        for armed in self.live.accounts.values():
+            try:
+                account = self._p.trading.get_account(armed.account_id)
+            except PlatformError:
+                continue
+            markets = markets_of(account.venue)
+            if all(i.split(":", 1)[0] in markets for i in m.instruments) and (
+                armed.allow_futures or not needs_futures
+            ):
+                return armed
+        return None
+
     def _promote(self, run: Run) -> None:
         now = self._p.clock.now()
+        if self._halted("LIVE"):
+            return
         for m in list(self.managed.values()):
             if m.mode != "PAPER" or m.status != "ACTIVE" or m.live_deployment:
                 continue
             ok, reasons = self._track_record(m, now)
             if not ok:
                 continue
-            if not self.live.armed or not self.live.account_id:
+            armed = self._live_account_for(m)
+            if armed is None:
                 if not m.ready_for_live_noted:
                     m.ready_for_live_noted = True
                     self._save(m)
@@ -582,14 +767,15 @@ class Autopilot:
                         f"{m.label} on {m.instrument_id} is ready for live trading",
                         [
                             *reasons,
-                            "Arm live trading with a capital cap to let the autopilot place real orders.",
+                            "Arm a broker account that trades it (with a capital cap) to let the autopilot "
+                            "place real orders.",
                         ],
                         instrument_id=m.instrument_id,
                         deployment_id=m.deployment_id,
                         run_id=run.run_id,
                     )
                 continue
-            if not self._live_ready(self.live.account_id):
+            if not self._live_ready(armed.account_id):
                 self._decide(
                     "SKIP",
                     f"Live promotion of {m.instrument_id} waits for the broker",
@@ -599,14 +785,18 @@ class Autopilot:
                 )
                 continue
             used = sum(
-                (x.capital for x in self.managed.values() if x.mode == "LIVE" and x.status == "ACTIVE"),
+                (
+                    x.capital
+                    for x in self.managed.values()
+                    if x.mode == "LIVE" and x.status == "ACTIVE" and x.account_id == armed.account_id
+                ),
                 Decimal(0),
             )
-            capital = min(m.capital, self.live.capital_cap - used)
+            capital = min(m.capital, armed.capital_cap - used)
             if capital <= 0:
                 continue
             try:
-                live = self._start_live(m, capital)
+                live = self._start_live(m, capital, armed)
             except PlatformError as exc:
                 self._decide(
                     "SKIP",
@@ -619,7 +809,10 @@ class Autopilot:
             self._decide(
                 "PROMOTE",
                 f"Live trading {m.label} on {m.instrument_id} with {capital:,}",
-                [*reasons, f"within the live cap of {self.live.capital_cap:,} set by {self.live.armed_by}"],
+                [
+                    *reasons,
+                    f"within the {armed.account_id} cap of {armed.capital_cap:,} set by {armed.armed_by}",
+                ],
                 instrument_id=m.instrument_id,
                 deployment_id=live.deployment_id,
                 run_id=run.run_id,
@@ -641,22 +834,11 @@ class Autopilot:
             f"paper P&L {m.pnl:,.2f} on {m.capital:,} allocated, drawdown {drawdown:.1%}",
         ]
 
-    def _start_live(self, m: Managed, capital: Decimal) -> Managed:
-        params = {**m.parameters, "capital": str(capital)}
-        trading = self._p.trading
-        deployment = trading.create_deployment(
-            strategy_name="autopilot",
-            strategy_version=AutopilotStrategy.version,
-            account_id=self.live.account_id,
-            parameters=params,
-            instruments=[m.instrument_id],
-            created_by=AUTOPILOT,
-            bar_interval_seconds=self.config.interval_seconds,
-        )
-        # The person who armed live trading is the approver of record for every live autopilot deployment.
-        trading.approve(deployment.deployment_id, self.live.armed_by or AUTOPILOT)
-        trading.start(deployment.deployment_id)
-        self._sync(deployment)
+    def _start_live(self, m: Managed, capital: Decimal, armed: ArmedAccount) -> Managed:
+        lead = self._p.instruments.get(m.instruments[0])
+        params = {**m.parameters, "capital": str(self.config.research_config().capital_for(lead, capital))}
+        # The person who armed the account is the approver of record for every live autopilot deployment.
+        deployment = self._launch(m.strategy, armed.account_id, params, m.instruments, armed.armed_by)
         live = Managed(
             deployment.deployment_id,
             m.instrument_id,
@@ -670,6 +852,11 @@ class Autopilot:
             expected=m.expected,
             model=m.model,
             source_deployment=m.deployment_id,
+            account_id=armed.account_id,
+            universe_id=m.universe_id,
+            instruments=list(m.instruments),
+            currency=m.currency,
+            strategy=m.strategy,
         )
         m.live_deployment = deployment.deployment_id
         self._save(live)
@@ -679,10 +866,13 @@ class Autopilot:
     # ---- monitoring ---------------------------------------------------------------------------
 
     def monitor(self) -> None:
-        """Mark P&L, close out deployments that breach their drawdown limit, finish close-outs."""
+        """Mark P&L, roll expiring futures, close out drawdown breaches, and de-gross the whole book."""
         limit = Decimal(str(self.config.max_deployment_drawdown))
         with self._p.lock:
             for m in list(self.managed.values()):
+                if m.status == "ACTIVE" and self._expiring(m):
+                    self._roll(m)
+                    continue
                 deployment = self._p.trading.deployments.get(m.deployment_id)
                 if deployment is None:
                     continue
@@ -702,16 +892,129 @@ class Autopilot:
                     self._retire(
                         m, [f"drawdown {drawdown:.1%} of allocated capital exceeded the {limit:.0%} limit"]
                     )
+            for mode in ("PAPER", "LIVE"):
+                self._check_book(mode)
+
+    def _check_book(self, mode: str) -> None:
+        """Portfolio-level stop: if the book falls too far from its peak, go to cash and pause."""
+        book = [m for m in self.managed.values() if m.mode == mode]
+        if not book:
+            return
+        total = sum((m.pnl for m in book), Decimal(0))
+        if mode == "PAPER":
+            budget = self.config.capital
+        else:
+            budget = sum((a.capital_cap for a in self.live.accounts.values()), Decimal(0))
+        peak = max(self.peaks.get(mode, Decimal(0)), total)
+        self.peaks[mode] = peak
+        limit = Decimal(str(self.config.portfolio_drawdown_limit))
+        active = [m for m in book if m.status == "ACTIVE"]
+        if budget > 0 and active and (peak - total) / budget > limit:
+            for m in active:
+                self._close(m, "portfolio drawdown limit")
+            self.halted_until[mode] = self._p.clock.now() + timedelta(days=self.config.halt_cooldown_days)
+            self.peaks[mode] = total
+            self._decide(
+                "HALT",
+                f"{mode.title()} book cut to cash: drawdown {(peak - total) / budget:.1%} of the budget",
+                [
+                    f"the limit is {limit:.0%}; {len(active)} deployments were closed",
+                    f"new deployments resume after {self.halted_until[mode]:%Y-%m-%d} (UTC)",
+                ],
+            )
+        self._save_state()
+
+    def _halted(self, mode: str) -> bool:
+        until = self.halted_until.get(mode)
+        return until is not None and self._p.clock.now() < until
+
+    def _expiring(self, m: Managed) -> bool:
+        for instrument_id in m.instruments:
+            instrument = self._p.instruments.get(instrument_id)
+            if instrument.expiry and instrument.expiry <= self._p.clock.now() + timedelta(
+                days=self.config.roll_days
+            ):
+                return True
+        return False
+
+    def _roll(self, m: Managed) -> None:
+        """Move a futures deployment to the next contract before expiry, keeping its track record."""
+        current = self._p.instruments.get(m.instrument_id)
+        following = self._front(current.venue, current.underlying or "", after=current.expiry)
+        if following is None:
+            self._retire(m, [f"{current.instrument_id} expires soon and no later contract is loaded"])
+            return
+        approver = AUTOPILOT
+        if m.mode == "LIVE":
+            armed = self.live.accounts.get(m.account_id)
+            if armed is None:
+                self._retire(m, [f"{current.instrument_id} expires soon and live trading is no longer armed"])
+                return
+            approver = armed.armed_by
+        self._close(m, f"rolling to {following.instrument_id}")
+        try:
+            deployment = self._launch(
+                m.strategy, m.account_id, m.parameters, [following.instrument_id], approver
+            )
+        except PlatformError as exc:
+            self._decide(
+                "SKIP",
+                f"Could not roll {m.label} to {following.instrument_id}",
+                [exc.message],
+                instrument_id=following.instrument_id,
+            )
+            return
+        rolled = Managed(
+            deployment.deployment_id,
+            following.instrument_id,
+            m.candidate,
+            m.label,
+            m.signal,
+            m.mode,
+            m.capital,
+            m.parameters,
+            m.created_at,
+            expected=m.expected,
+            model=m.model,
+            source_deployment=m.source_deployment,
+            account_id=m.account_id,
+            universe_id=m.universe_id,
+            currency=m.currency,
+            strategy=m.strategy,
+            live_deployment=m.live_deployment,
+            ready_for_live_noted=m.ready_for_live_noted,
+        )
+        m.rolled_to = deployment.deployment_id
+        self._save(m)
+        self._save(rolled)
+        for other in self.managed.values():  # keep paper <-> live links pointing at the new deployment
+            if other.live_deployment == m.deployment_id:
+                other.live_deployment = rolled.deployment_id
+                self._save(other)
+            if other.source_deployment == m.deployment_id:
+                other.source_deployment = rolled.deployment_id
+                self._save(other)
+        self._decide(
+            "ROLL",
+            f"Rolled {m.label} from {current.instrument_id} to {following.instrument_id} ({m.mode.lower()})",
+            [
+                f"{current.instrument_id} expires {current.expiry:%Y-%m-%d}; the position was closed "
+                "and the strategy "
+                "continues on the next contract"
+            ],
+            instrument_id=following.instrument_id,
+            deployment_id=rolled.deployment_id,
+        )
 
     def _mark(self, m: Managed) -> None:
         pnl = Decimal(0)
-        for p in self._p.positions.positions():
-            if p.deployment_id != m.deployment_id:
-                continue
+        for p in self._p.positions.positions(deployment_id=m.deployment_id, open_only=False):
             pnl += p.realized_pnl - p.fees_paid
             price = self._p.market.reference_price(p.instrument_id)
             if p.quantity and price is not None:
                 pnl += p.unrealized_pnl(price)
+        rate = {**DEFAULT_FX, **self.config.fx_rates}.get(m.currency, Decimal(1))
+        pnl = (pnl * rate).quantize(Decimal("0.01"))  # into the budget currency
         m.pnl = pnl
         if pnl > m.peak_pnl:
             m.peak_pnl = pnl
@@ -781,6 +1084,7 @@ class Autopilot:
         return {
             "config": encode(self.config),
             "live": encode(self.live),
+            "halted_until": {k: v.isoformat() for k, v in self.halted_until.items() if self._halted(k)},
             "progress": dict(self.progress),
             "last_run_at": self.last_run_at.isoformat() if self.last_run_at else None,
             "next_run_at": (n.isoformat() if (n := self.next_run_at()) else None),
@@ -836,7 +1140,7 @@ class Autopilot:
                 if not e["passed"]
             ][:5],
             "decisions": [{k: d[k] for k in ("kind", "title", "reasons")} for d in decisions],
-            "live_trading_armed": self.live.armed,
+            "live_trading_armed_accounts": sorted(self.live.accounts),
         }
 
 

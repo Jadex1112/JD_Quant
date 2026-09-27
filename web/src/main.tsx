@@ -11,7 +11,7 @@ function applyTheme() {
   } catch {
     /* storage may be unavailable */
   }
-  const theme = stored ?? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  const theme = stored === "light" ? "light" : "dark"; // dark unless the user switched to light
   document.documentElement.dataset.theme = theme;
 }
 applyTheme();
