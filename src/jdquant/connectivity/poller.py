@@ -28,6 +28,7 @@ class VenuePoller:
         self._connections = connections
         self._runner = runner
         self.interval = interval
+        self.watched = None  # callable returning instruments open on charts
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -59,6 +60,8 @@ class VenuePoller:
                 wanted |= set(deployment.instruments)
         for connection in list(self._connections.connections.values()):
             wanted |= set(connection.watchlist)
+        if self.watched is not None:
+            wanted |= self.watched()
 
         for connection_id, adapter in list(self._connections.adapters.items()):
             connection = self._connections.connections[connection_id]

@@ -21,7 +21,7 @@ export function MarketsPage() {
   );
 
   useEffect(() => {
-    if (!charted && all.length) setCharted(all[0].instrument_id);
+    if (!charted && all.length) setCharted((all.find((i) => i.instrument_id === "OANDA:XAU_USD") ?? all[0]).instrument_id);
   }, [all, charted]);
 
   return (

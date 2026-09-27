@@ -1,4 +1,4 @@
-"""Indian cash-equity costs and NSE trading hours.
+"""Indian market costs (NSE cash, MCX, currency futures), crypto and forex routing, and NSE hours.
 
 Statutory rates are those in force for NSE equity as of 2025 and change from time to time; brokerage
 defaults follow Fyers' published plan. Every rate is a field so it can be matched to a contract note.
@@ -13,8 +13,8 @@ from enum import StrEnum
 from jdquant.core.types import Side
 from jdquant.execution.simulator import FeeSchedule
 from jdquant.marketdata.instruments import AssetClass, Instrument
+from jdquant.markets.sessions import FX_VENUES, MarketSession
 from jdquant.markets.sessions import IST as IST  # re-exported for existing callers
-from jdquant.markets.sessions import MarketSession
 from jdquant.oms.orders import Liquidity
 
 PAISA = Decimal("0.01")
@@ -155,6 +155,10 @@ def fees_for(instrument: Instrument, product: Product = Product.CNC) -> FeeSched
         return IndiaEquityFees(product=product)
     if instrument.venue == "BINANCE":
         return CRYPTO_FEES
+    if instrument.venue in FX_VENUES:
+        from jdquant.markets.forex import FX_FEES
+
+        return FX_FEES
     return FeeSchedule()
 
 
@@ -168,6 +172,9 @@ class MarketFees(FeeSchedule):
         self, instrument: Instrument, side: Side, quantity: Decimal, price: Decimal, liquidity: Liquidity
     ) -> Decimal:
         return fees_for(instrument, self.product).fee(instrument, side, quantity, price, liquidity)
+
+    def financing_rate(self, instrument: Instrument, direction: int) -> Decimal:
+        return fees_for(instrument, self.product).financing_rate(instrument, direction)
 
     def fingerprint(self) -> list[str]:
         return [type(self).__name__, self.product.value]

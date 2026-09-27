@@ -554,3 +554,192 @@ class FakeFyers:
         return _json(
             200, {"s": "ok", "code": 1101, "message": "Order submitted successfully", "id": venue_id}
         )
+
+
+# ---- OANDA v20 ---------------------------------------------------------------------------------
+
+
+def _unix(at: datetime) -> str:
+    return f"{at.timestamp():.9f}"
+
+
+class FakeOanda:
+    """OANDA's v20 REST API (practice host), as described by the official v20-python SDK."""
+
+    HOST = "api-fxpractice.oanda.com"
+
+    def __init__(self, *, token: str = "otoken", account: str = "101-001-1234567-001"):
+        self.token, self.account = token, account
+        self.now = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)  # a Monday, markets open
+        self.prices = {
+            "XAU_USD": (Decimal("3999.80"), Decimal("4000.20")),
+            "EUR_USD": (Decimal("1.16993"), Decimal("1.17007")),
+            "USD_JPY": (Decimal("146.993"), Decimal("147.007")),
+        }
+        self.orders: dict[str, dict] = {}  # by order id
+        self.transactions: dict[str, dict] = {}
+        self.requests: list[httpx.Request] = []
+        self.fill_market = True  # False: FOK market orders are cancelled
+        self._ids = itertools.count(100)
+
+    def client(self) -> httpx.Client:
+        return httpx.Client(transport=httpx.MockTransport(self.handle))
+
+    def _tx(self, **fields) -> dict:
+        tx = {"id": str(next(self._ids)), "time": _unix(self.now), "accountID": self.account, **fields}
+        self.transactions[tx["id"]] = tx
+        return tx
+
+    def _fill(self, order: dict, price: Decimal) -> dict:
+        order["state"] = "FILLED"
+        fill = self._tx(
+            type="ORDER_FILL",
+            orderID=order["id"],
+            clientOrderID=order["clientExtensions"]["id"],
+            instrument=order["instrument"],
+            units=order["units"],
+            price=str(price),
+            commission="0.0000",
+            financing="0.0000",
+            halfSpreadCost="0.2000",
+        )
+        order["fillingTransactionID"] = fill["id"]
+        return fill
+
+    def fill_limit(self, client_id: str) -> None:
+        order = self._by_client(client_id)
+        self._fill(order, Decimal(order["price"]))
+
+    def _by_client(self, client_id: str) -> dict | None:
+        return next((o for o in self.orders.values() if o["clientExtensions"]["id"] == client_id), None)
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        url = urlsplit(str(request.url))
+        if url.hostname != self.HOST:
+            return _json(404, {"errorMessage": "unknown host"})
+        if request.headers.get("Authorization") != f"Bearer {self.token}":
+            return _json(401, {"errorMessage": "Insufficient authorization to perform request."})
+        assert request.headers.get("Accept-Datetime-Format") == "UNIX"
+        params = dict(parse_qsl(url.query))
+        path, acct = url.path, f"/v3/accounts/{self.account}"
+        if path.startswith("/v3/accounts/") and not path.startswith(acct):
+            return _json(403, {"errorMessage": "The provided request was forbidden."})
+        if path == f"{acct}/summary":
+            return _json(
+                200,
+                {
+                    "account": {
+                        "id": self.account,
+                        "currency": "USD",
+                        "balance": "100000.0000",
+                        "NAV": "100000.0000",
+                        "marginAvailable": "98000.0000",
+                        "marginUsed": "2000.0000",
+                    },
+                    "lastTransactionID": "99",
+                },
+            )
+        if path == f"{acct}/instruments":
+            return _json(
+                200,
+                {
+                    "instruments": [
+                        {"name": "XAU_USD", "type": "METAL", "displayName": "Gold", "pipLocation": -2,
+                         "displayPrecision": 2, "tradeUnitsPrecision": 0, "minimumTradeSize": "1",
+                         "maximumOrderUnits": "5000", "marginRate": "0.05"},
+                        {"name": "EUR_USD", "type": "CURRENCY", "displayName": "EUR/USD", "pipLocation": -4,
+                         "displayPrecision": 5, "tradeUnitsPrecision": 0, "minimumTradeSize": "1",
+                         "maximumOrderUnits": "100000000", "marginRate": "0.0333"},
+                        {"name": "USD_JPY", "type": "CURRENCY", "displayName": "USD/JPY", "pipLocation": -2,
+                         "displayPrecision": 3, "tradeUnitsPrecision": 0, "minimumTradeSize": "1",
+                         "maximumOrderUnits": "100000000", "marginRate": "0.0333"},
+                    ]
+                },
+            )  # fmt: skip
+        if path == f"{acct}/pricing":
+            wanted = params.get("instruments", "").split(",")
+            return _json(
+                200,
+                {
+                    "prices": [
+                        {
+                            "type": "PRICE",
+                            "instrument": name,
+                            "time": _unix(self.now),
+                            "tradeable": True,
+                            "bids": [{"price": str(self.prices[name][0]), "liquidity": 1000000}],
+                            "asks": [{"price": str(self.prices[name][1]), "liquidity": 1000000}],
+                        }
+                        for name in wanted
+                        if name in self.prices
+                    ]
+                },
+            )
+        if path.startswith("/v3/instruments/") and path.endswith("/candles"):
+            name = path.split("/")[3]
+            step = {"M1": 60, "M15": 900, "H1": 3600, "D": 86400}[params["granularity"]]
+            assert params["price"] == "M"
+            count = int(params["count"])
+            end = float(params["to"]) if "to" in params else self.now.timestamp()
+            end -= end % step
+            mid = float((self.prices[name][0] + self.prices[name][1]) / 2)
+            rows = []
+            for k in range(count, 0, -1):
+                t = end - k * step
+                p = mid * (1 + 0.0005 * ((int(t) // step) % 7 - 3))
+                bar = {"o": f"{p:.5f}", "h": f"{p * 1.001:.5f}", "l": f"{p * 0.999:.5f}", "c": f"{p:.5f}"}
+                rows.append({"time": f"{t:.9f}", "complete": True, "volume": 42, "mid": bar})
+            rows.append(
+                {"time": f"{end:.9f}", "complete": False, "volume": 3,
+                 "mid": {"o": "1", "h": "1", "l": "1", "c": "1"}}
+            )  # fmt: skip
+            return _json(200, {"instrument": name, "granularity": params["granularity"], "candles": rows})
+        if path == f"{acct}/orders" and request.method == "POST":
+            return self._place(json.loads(request.content)["order"])
+        if path.startswith(f"{acct}/orders/@"):
+            rest = path[len(f"{acct}/orders/@") :]
+            client_id, _, action = rest.partition("/")
+            order = self._by_client(client_id)
+            if order is None:
+                return _json(404, {"errorCode": "ORDER_DOESNT_EXIST", "errorMessage": "Order not found"})
+            if action == "cancel" and request.method == "PUT":
+                if order["state"] != "PENDING":
+                    return _json(404, {"errorCode": "ORDER_DOESNT_EXIST", "errorMessage": "not pending"})
+                order["state"] = "CANCELLED"
+                cancel = self._tx(type="ORDER_CANCEL", orderID=order["id"], reason="CLIENT_REQUEST")
+                return _json(200, {"orderCancelTransaction": cancel, "lastTransactionID": cancel["id"]})
+            return _json(200, {"order": order, "lastTransactionID": "999"})
+        if path.startswith(f"{acct}/transactions/"):
+            tx = self.transactions.get(path.rsplit("/", 1)[1])
+            if tx is None:
+                return _json(404, {"errorMessage": "Transaction not found"})
+            return _json(200, {"transaction": tx, "lastTransactionID": "999"})
+        return _json(404, {"errorMessage": f"no route {request.method} {path}"})
+
+    def _place(self, body: dict) -> httpx.Response:
+        name = body["instrument"]
+        if name not in self.prices:
+            reject = self._tx(type="MARKET_ORDER_REJECT", rejectReason="INSTRUMENT_UNKNOWN")
+            return _json(400, {"orderRejectTransaction": reject, "errorCode": "INSTRUMENT_UNKNOWN",
+                               "errorMessage": "unknown"})  # fmt: skip
+        created = self._tx(type=f"{body['type']}_ORDER", **{k: v for k, v in body.items() if k != "type"})
+        order = {**body, "id": created["id"], "state": "PENDING", "createTime": created["time"]}
+        self.orders[order["id"]] = order
+        out = {"orderCreateTransaction": created}
+        bid, ask = self.prices[name]
+        buying = Decimal(body["units"]) > 0
+        if body["type"] == "MARKET":
+            assert body["timeInForce"] == "FOK"
+            if self.fill_market:
+                out["orderFillTransaction"] = self._fill(order, ask if buying else bid)
+            else:
+                order["state"] = "CANCELLED"
+                out["orderCancelTransaction"] = self._tx(
+                    type="ORDER_CANCEL", orderID=order["id"], reason="MARKET_HALTED"
+                )
+        elif body["type"] == "LIMIT":
+            limit = Decimal(body["price"])
+            if (buying and ask <= limit) or (not buying and bid >= limit):
+                out["orderFillTransaction"] = self._fill(order, ask if buying else bid)
+        return _json(201, {**out, "lastTransactionID": str(next(self._ids))})

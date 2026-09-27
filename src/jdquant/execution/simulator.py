@@ -34,6 +34,10 @@ class FeeSchedule:
         bps = self.maker_bps if liquidity is Liquidity.MAKER else self.taker_bps
         return instrument.notional(quantity, price) * bps / BPS
 
+    def financing_rate(self, instrument: Instrument, direction: int) -> Decimal:
+        """Annual cost of holding a position overnight (margin products); zero for cash markets."""
+        return ZERO
+
     def fingerprint(self) -> list[str]:
         """Stable description for backtest reproducibility hashes."""
         return [str(self.maker_bps), str(self.taker_bps)]

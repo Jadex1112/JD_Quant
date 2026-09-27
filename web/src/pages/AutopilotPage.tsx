@@ -10,6 +10,8 @@ import {
   type AnalystConcern,
   type ArmedAccount,
   type EvaluationSummary,
+  type MonitorReview,
+  type MonitorStatus,
   type Protection,
   type SelectedStrategy,
   type UniverseOption,
@@ -39,10 +41,30 @@ const DECISION_KIND: Record<string, string> = {
   DISARM: "warn",
   ROLL: "",
   HALT: "bad",
+  AI_EXIT: "ai",
+  AI_REDUCE: "ai",
+  AI_REJECT: "ai",
   ERROR: "bad",
 };
 
 const SEVERITY: Record<string, string> = { high: "bad", medium: "warn", low: "" };
+const VERDICT: Record<string, string> = {
+  HOLD: "good",
+  APPROVE: "good",
+  REDUCE: "warn",
+  EXIT: "bad",
+  REJECT: "bad",
+  NO_ANSWER: "",
+};
+
+/** Spot gold and the major pairs on 1-hour bars: enough history for walk-forward evidence. */
+const FX_PRESET: Partial<AutopilotConfig> = {
+  universe: ["OANDA:XAU_USD", "OANDA:EUR_USD", "OANDA:GBP_USD", "OANDA:USD_JPY", "OANDA:AUD_USD"],
+  interval_seconds: 3600,
+  history_bars: 2000,
+  max_positions: 3,
+  max_weight: 0.5,
+};
 
 /** A basket strategy trades several instruments; show them compactly. */
 function instrumentsOf(e: { instrument_id: string; instruments?: string[] }): string {
@@ -108,6 +130,8 @@ export function AutopilotPage() {
           {halted.map(([mode, until]) => `${mode} ${time(until)}`).join(", ")}. Existing positions were cut to cash.
         </div>
       )}
+
+      <MonitorPanel canRun={can("autopilot:run")} canConfigure={can("autopilot:configure")} />
 
       <ProtectionPanel
         protection={s.protection}
@@ -329,14 +353,16 @@ function HowItWorks() {
       </summary>
       <ol className="small" style={{ marginBottom: 0 }}>
         <li>
-          <strong>Research like a systematic fund.</strong> For every instrument (NSE stocks and ETFs, gold, crypto, MCX commodities and
-          currency futures) it tries around 30 strategies: multi-speed trend following as CTAs run it, moving averages, MACD, Supertrend,
-          momentum, mean reversion, breakouts, machine-learning models — plus cross-sectional momentum and short-term reversal across
-          baskets. Futures may also go short.
+          <strong>Research like a systematic fund.</strong> For every instrument (spot gold XAU/USD and forex pairs, NSE stocks and ETFs,
+          crypto, MCX commodities and currency futures) it tries around 30 strategies: multi-speed trend following as CTAs run it, moving
+          averages, MACD, Supertrend, momentum, mean reversion, breakouts, the London-open breakout of the Asian range for gold and
+          currencies, machine-learning models — plus cross-sectional momentum and short-term reversal across baskets. Forex, gold and
+          futures may also go short.
         </li>
         <li>
           <strong>Walk-forward backtest with every charge.</strong> Each strategy trades history it was never tuned on, with brokerage,
-          STT/CTT, exchange fees, stamp duty, GST, SEBI fees (or the crypto exchange fee) and slippage. Strategies whose charges eat more
+          STT/CTT, exchange fees, stamp duty, GST, SEBI fees, the crypto exchange fee, or — for forex and gold — the spread and overnight
+          financing, plus slippage. Strategies whose charges eat more
           than half their gross profit are rejected.
         </li>
         <li>
@@ -348,6 +374,12 @@ function HowItWorks() {
           If you allow it, a high-severity concern vetoes that strategy — it can only remove risk, never add trades.
         </li>
         <li>
+          <strong>AI trade monitor, every minute.</strong> The AI looks at every open trade and every new entry with live prices, the
+          spread, one-minute bars and indicators, and says hold, reduce or exit (approve or reject for entries). In advise mode it only
+          comments; in act mode it may close, halve or hold back trades it is confident about. Each verdict is scored against what the
+          price did next, so you can see whether it helps.
+        </li>
+        <li>
           <strong>Protect capital.</strong> Positions are sized to a volatility target. The book has a loss floor that rises to lock in
           gains, a daily loss limit, and a drawdown halt. At the floor it goes to cash until you reset it.
         </li>
@@ -357,6 +389,148 @@ function HowItWorks() {
         </li>
       </ol>
     </details>
+  );
+}
+
+function MonitorPanel({ canRun, canConfigure }: { canRun: boolean; canConfigure: boolean }) {
+  const { run } = useApp();
+  const status = useData(() => get<MonitorStatus>("/autopilot/monitor"), [], 5000);
+  const [showLog, setShowLog] = useState(false);
+  const m = status.data;
+  if (!m) return null;
+  const score = (h: "15" | "60") => m.scorecard[h];
+  const setMode = async (mode: "advise" | "act") => {
+    await run(() => put("/autopilot/config", { monitor_mode: mode }), mode === "act" ? "The AI may now act on its verdicts" : "The AI now advises only");
+    status.reload();
+  };
+  return (
+    <Section
+      title="AI trade monitor"
+      actions={
+        <>
+          {m.available ? <Badge kind="ai">{m.provider}</Badge> : <Badge>not configured</Badge>}
+          {m.enabled && m.available && (m.mode === "act" ? <Badge kind="warn">acting</Badge> : <Badge>advising</Badge>)}
+          {canConfigure && m.available && m.enabled && (
+            <button className="small" onClick={() => setMode(m.mode === "act" ? "advise" : "act")}>
+              {m.mode === "act" ? "Switch to advise" : "Let it act…"}
+            </button>
+          )}
+          {canRun && m.available && (
+            <button
+              className="small"
+              onClick={async () => {
+                await run(() => post("/autopilot/monitor:run"));
+                status.reload();
+              }}
+            >
+              Review now
+            </button>
+          )}
+        </>
+      }
+    >
+      {!m.available ? (
+        <p className="small muted" style={{ margin: 0 }}>
+          Set <code>NVIDIA_API_KEY</code> (or an Anthropic key) on the server and the AI will review every autopilot trade each minute.
+        </p>
+      ) : !m.enabled ? (
+        <p className="small muted" style={{ margin: 0 }}>Turned off in the autopilot settings.</p>
+      ) : (
+        <div className="stack">
+          <p className="small muted" style={{ margin: 0 }}>
+            {m.model} checks every open position and new entry every {m.interval_seconds >= 120 ? `${m.interval_seconds / 60} minutes` : `${m.interval_seconds} seconds`}
+            {m.mode === "act"
+              ? `, and acts when at least ${pct(m.min_confidence, 0)} confident — it can only close, halve or hold back trades.`
+              : ". Advice only: switch to act once its track record below is convincing."}{" "}
+            Last review {time(m.last_run_at)} · {m.calls_today} calls today
+          </p>
+          {m.last_error && <div className="alert warn small">{m.last_error}</div>}
+          {m.pending.length > 0 && (
+            <div className="alert small" aria-live="polite">
+              Waiting for the AI: {m.pending.map((p) => `${p.side} ${p.instrument_id} (${p.label})`).join("; ")}
+            </div>
+          )}
+          {m.positions.length === 0 ? (
+            <Empty>No open autopilot positions to watch right now.</Empty>
+          ) : (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Position</th>
+                    <th>Verdict</th>
+                    <th className="num">Confidence</th>
+                    <th>Why</th>
+                    <th>When</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {m.positions.map((r) => (
+                    <tr key={r.review_id}>
+                      <td>
+                        {r.direction > 0 ? "Long" : "Short"} {num(r.quantity)} {r.instrument_id}
+                        <div className="small muted">{r.label}</div>
+                      </td>
+                      <td><VerdictBadge r={r} /></td>
+                      <td className="num">{pct(r.confidence, 0)}</td>
+                      <td className="small" style={{ whiteSpace: "normal", minWidth: 220 }}>{r.reason}</td>
+                      <td className="small">{time(r.at)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <div className="grid three">
+            {(["15", "60"] as const).map((h) => (
+              <div className="card kpi" key={h}>
+                <span className="label">Right after {h} min</span>
+                <span className="value">{score(h).accuracy === null ? "—" : pct(score(h).accuracy, 0)}</span>
+                <span className="small muted">of {score(h).judged} verdicts scored</span>
+              </div>
+            ))}
+            <div className="card kpi">
+              <span className="label">Value of its actions (60 min)</span>
+              <span className={`value ${tone(score("60").value_of_actions_inr)}`}>₹{signed(score("60").value_of_actions_inr)}</span>
+              <span className="small muted">loss avoided minus gain missed · {m.scorecard.acted} action{m.scorecard.acted === 1 ? "" : "s"}</span>
+            </div>
+          </div>
+          <div>
+            <button className="link small" onClick={() => setShowLog((v) => !v)} aria-expanded={showLog}>
+              {showLog ? "Hide" : "Show"} recent verdicts ({m.recent.length})
+            </button>
+          </div>
+          {showLog && (
+            <ol className="timeline small">
+              {m.recent.map((r) => (
+                <li key={r.review_id}>
+                  <div className="row">
+                    <VerdictBadge r={r} />
+                    <strong>
+                      {r.kind === "ENTRY" ? "Entry" : "Position"} · {r.direction > 0 ? "long" : "short"} {r.instrument_id}
+                    </strong>
+                    <span className="muted">
+                      {time(r.at)} · {pct(r.confidence, 0)}
+                      {r.moves["60"] !== undefined && r.moves["60"] !== null ? ` · price ${signed((r.moves["60"] ?? 0) * 100)}% in its favour after 60 min` : ""}
+                    </span>
+                  </div>
+                  <div className="muted">{r.reason}</div>
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+      )}
+    </Section>
+  );
+}
+
+function VerdictBadge({ r }: { r: MonitorReview }) {
+  return (
+    <>
+      <Badge kind={VERDICT[r.verdict] ?? ""}>{r.verdict.replace("_", " ")}</Badge>
+      {r.acted && <span className="small muted"> · acted</span>}
+    </>
   );
 }
 
@@ -700,6 +874,10 @@ function SettingsDialog({ config, onClose }: { config: AutopilotConfig; onClose:
     "portfolio_drawdown_limit",
     "halt_cooldown_days",
     "roll_days",
+    "monitor_interval_seconds",
+    "monitor_min_confidence",
+    "monitor_cooldown_minutes",
+    "monitor_max_calls_per_day",
   ];
   const toNumbers = (): AutopilotConfig => {
     const out = { ...form, fx_rates: { ...form.fx_rates, USDT: usdt, USDC: usdt, USD: usdt } } as Record<string, unknown>;
@@ -720,7 +898,22 @@ function SettingsDialog({ config, onClose }: { config: AutopilotConfig; onClose:
           <legend className="small muted" style={{ marginBottom: 6 }}>
             Universe ({form.universe.length} selected) — what the autopilot may trade
           </legend>
-          <input placeholder="Search stocks, gold, crypto, futures…" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Search instruments" />
+          <div className="row">
+            <input
+              placeholder="Search stocks, gold, crypto, futures…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              aria-label="Search instruments"
+              style={{ flex: 1 }}
+            />
+            <button
+              type="button"
+              onClick={() => setForm((f) => ({ ...f, ...FX_PRESET }))}
+              title="Spot gold and the major currency pairs on 1-hour bars"
+            >
+              Focus: XAU/USD &amp; forex
+            </button>
+          </div>
           <div style={{ maxHeight: 220, overflow: "auto", marginTop: 6 }}>
             {groups.map(([group, items]) => (
               <div key={group} style={{ marginBottom: 8 }}>
@@ -739,8 +932,8 @@ function SettingsDialog({ config, onClose }: { config: AutopilotConfig; onClose:
             )}
           </div>
           <p className="small muted" style={{ margin: "4px 0 0" }}>
-            Futures appear as rolling front months (e.g. MCX:GOLDM1!) and roll before expiry. XAU/USD is available as PAXG/USDT
-            (tokenized gold) on Binance; in INR use gold ETFs or MCX gold.
+            Spot XAU/USD and forex pairs trade through an OANDA connection (practice account by default). Futures appear as rolling
+            front months (e.g. MCX:GOLDM1!) and roll before expiry; PAXG/USDT on Binance also tracks XAU/USD.
           </p>
         </fieldset>
         <div className="form-grid">
@@ -784,6 +977,47 @@ function SettingsDialog({ config, onClose }: { config: AutopilotConfig; onClose:
             {numberField("portfolio_drawdown_limit", "Book drawdown halt (0–1)", "Cut everything to cash if the book falls this far from its peak")}
             {numberField("halt_cooldown_days", "Pause after a halt (days)")}
             {numberField("max_deployment_drawdown", "Close a strategy at drawdown of its capital (0–1)")}
+          </div>
+        </details>
+        <details open>
+          <summary className="small">AI trade monitor (every minute)</summary>
+          <div className="stack" style={{ marginTop: 8 }}>
+            <label className="field inline">
+              <input type="checkbox" checked={form.monitor_enabled} onChange={(e) => set("monitor_enabled", e.target.checked)} /> Review every
+              open autopilot trade and every new entry with the AI
+            </label>
+            <fieldset style={{ border: "none", padding: 0, margin: 0 }} disabled={!form.monitor_enabled}>
+              <legend className="small muted">What the AI may do</legend>
+              <label className="field inline">
+                <input type="radio" name="monitor-mode" checked={form.monitor_mode === "advise"} onChange={() => set("monitor_mode", "advise")} />{" "}
+                Advise — record and show verdicts; strategies trade exactly as backtested
+              </label>
+              <label className="field inline">
+                <input type="radio" name="monitor-mode" checked={form.monitor_mode === "act"} onChange={() => set("monitor_mode", "act")} /> Act —
+                close or halve positions and hold back entries it is confident about (it can never open or add)
+              </label>
+            </fieldset>
+            <div className="form-grid">
+              {numberField("monitor_interval_seconds", "Review every (seconds)", "30 to 3600; 60 = every minute")}
+              {numberField("monitor_min_confidence", "Act only above confidence (0–1)")}
+              {numberField("monitor_cooldown_minutes", "No re-entry after an AI exit (minutes)")}
+              {numberField("monitor_max_calls_per_day", "Max AI calls per day")}
+              <label className="field">
+                If the AI does not answer
+                <select value={form.monitor_fallback} onChange={(e) => set("monitor_fallback", e.target.value as AutopilotConfig["monitor_fallback"])}>
+                  <option value="allow">Let the strategy trade</option>
+                  <option value="block">Skip the entry</option>
+                </select>
+              </label>
+            </div>
+            <label className="field inline">
+              <input type="checkbox" checked={form.monitor_entry_gate} onChange={(e) => set("monitor_entry_gate", e.target.checked)} /> In act mode,
+              new entries wait for the AI&apos;s approval (up to 3 minutes)
+            </label>
+            <label className="field inline">
+              <input type="checkbox" checked={form.monitor_reasoning} onChange={(e) => set("monitor_reasoning", e.target.checked)} /> Let the
+              model reason before answering (better answers, slower and more tokens)
+            </label>
           </div>
         </details>
         <details>

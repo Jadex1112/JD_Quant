@@ -4,20 +4,20 @@ Research, paper trading and live trading all run these classes with the same par
 backtested is exactly what trades.
 
 - `AutopilotStrategy` trades one instrument from a single signal. It is long-only unless the instrument
-  can be shorted (futures), sizes positions by volatility within its allocated capital the way systematic
-  funds size risk, and applies protective stops.
+  can be shorted (futures, forex, spot gold on margin), sizes positions by volatility within its
+  allocated capital the way systematic funds size risk, and applies protective stops.
 - `RotationStrategy` trades a basket: every few bars it ranks the instruments and holds the best few
   (cross-sectional momentum) or the most oversold quality names (short-term reversal).
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, time
 from decimal import ROUND_FLOOR, Decimal
 
 from jdquant.core.errors import PlatformError
 from jdquant.marketdata.records import Candle
-from jdquant.markets.sessions import session_for
+from jdquant.markets.sessions import LONDON, session_for
 from jdquant.strategy.base import Param, Strategy
 from jdquant.strategy.indicators import (
     bollinger,
@@ -34,11 +34,14 @@ from jdquant.strategy.indicators import (
 
 SIGNALS = (
     "ma_cross", "rsi", "bollinger", "donchian", "ml",
-    "momentum", "macd", "supertrend", "rsi_trend", "volume_breakout", "orb", "ewmac",
+    "momentum", "macd", "supertrend", "rsi_trend", "volume_breakout", "orb", "ewmac", "london_breakout",
 )  # fmt: skip
 # Signals whose bearish state is a genuine short signal; mean-reversion "exits" are not.
-SHORTABLE = ("ma_cross", "macd", "supertrend", "momentum", "ewmac", "donchian", "ml", "orb")
-INTRADAY_ONLY = ("orb",)
+SHORTABLE = (
+    "ma_cross", "macd", "supertrend", "momentum", "ewmac", "donchian", "ml", "orb", "london_breakout",
+)  # fmt: skip
+INTRADAY_ONLY = ("orb", "london_breakout")  # day trades: always flat by the session's intraday cutoff
+LONDON_OPEN = time(7, 0)
 
 COMMON = {
     "capital": Param(Decimal, "100000", min=Decimal(0), description="capital allocated, quote currency"),
@@ -64,9 +67,10 @@ def volatility_scale(closes, vol_target: Decimal, bars_per_year: int) -> Decimal
 
 class AutopilotStrategy(Strategy):
     name = "autopilot"
-    version = "1.2.0"
+    version = "1.3.0"
     description = (
-        "AI-selected signal with volatility-based sizing, protective stops and shorting for futures."
+        "AI-selected signal with volatility-based sizing, protective stops and shorting where the "
+        "instrument allows it (futures, forex, spot metals)."
     )
     parameters = {
         "signal": Param(str, "ma_cross", description=f"one of {', '.join(SIGNALS)}"),
@@ -89,7 +93,9 @@ class AutopilotStrategy(Strategy):
         "trailing_stop": Param(
             Decimal, "0", min=Decimal(0), max=Decimal("0.5"), description="exit this far from the best price"
         ),
-        "allow_short": Param(bool, False, description="sell short on bearish signals (futures only)"),
+        "allow_short": Param(
+            bool, False, description="sell short on bearish signals (futures, forex and metals only)"
+        ),
         **COMMON,
     }  # fmt: skip
 
@@ -108,7 +114,8 @@ class AutopilotStrategy(Strategy):
             return
         p = self.ctx.params
         position = self.ctx.position(i)
-        late = p["intraday"] and session_for(self.ctx.instrument(i)).past_intraday_cutoff(candle.close_ts)
+        day_trade = p["intraday"] or p["signal"] in INTRADAY_ONLY
+        late = day_trade and session_for(self.ctx.instrument(i)).past_intraday_cutoff(candle.close_ts)
         view = self.decide(candle)
         if position > 0:
             if late or self._stopped_out(i, candle.close, 1) or view == "exit":
@@ -226,7 +233,34 @@ class AutopilotStrategy(Strategy):
                 opening = session[: p["period"]]
                 high, low = max(float(c.high) for c in opening), min(float(c.low) for c in opening)
                 return "enter" if close > high else "exit" if close < low else None
+            case "london_breakout":
+                return self._london_breakout(candle)
         return None
+
+    def _london_breakout(self, candle: Candle) -> str | None:
+        """Trade the break of the Asian-session range (00:00-07:00 London) during the London morning.
+
+        `period` is how many hours after 07:00 London a breakout may still be entered.
+        """
+        i, p = candle.instrument_id, self.ctx.params
+        if candle.interval_seconds > 3600:
+            return None
+        now = candle.close_ts.astimezone(LONDON)
+        hours_open = (now.hour * 60 + now.minute - LONDON_OPEN.hour * 60) / 60
+        if not 0 <= hours_open <= p["period"]:
+            return None
+        per_hour = max(1, 3600 // candle.interval_seconds)
+        asian = [
+            c
+            for c in self.ctx.candles(i, per_hour * (7 + p["period"]) + 2)
+            if c.open_ts.astimezone(LONDON).date() == now.date()
+            and c.open_ts.astimezone(LONDON).time() < LONDON_OPEN
+        ]
+        if len(asian) < per_hour * 7 * 0.8:  # the range needs most of the night's bars
+            return None
+        high, low = max(float(c.high) for c in asian), min(float(c.low) for c in asian)
+        close = float(candle.close)
+        return "enter" if close > high else "exit" if close < low else None
 
     def _stopped_out(self, instrument_id: str, price: Decimal, direction: int) -> bool:
         """Fixed stop from entry, trailing stop from the best price since entry, and take-profit."""

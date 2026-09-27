@@ -50,10 +50,15 @@ class Instrument:
     aliases: tuple[tuple[str, str], ...] = field(default=())
     expiry: datetime | None = None  # futures: last trading time
     underlying: str | None = None  # futures: the root symbol, e.g. GOLDM for MCX:GOLDM26JANFUT
+    shortable: bool = False  # margin products (forex, CFDs) that can be sold without holding them
 
     @property
     def is_future(self) -> bool:
         return self.expiry is not None
+
+    @property
+    def can_short(self) -> bool:
+        return self.shortable or self.is_future
 
     @property
     def instrument_id(self) -> str:

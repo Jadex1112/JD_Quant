@@ -70,7 +70,7 @@ async def stream(
     """Every quote for the requested instruments as it arrives (`event: quote`)."""
     live = _live(request)
     wanted = {i for i in instruments.split(",") if i}
-    subscription = live.subscribe()
+    subscription = live.subscribe(wanted)
 
     async def events():
         sent, idle = 0, 0

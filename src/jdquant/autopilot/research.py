@@ -30,6 +30,7 @@ import numpy as np
 from jdquant.ai.features import DEFAULT_FEATURES, build_feature_set
 from jdquant.ai.optimizer import optimize
 from jdquant.ai.training import LinearModel, TrainingConfig, train
+from jdquant.autopilot.strategy import SHORTABLE
 from jdquant.backtest.engine import BacktestConfig, run_backtest
 from jdquant.core.errors import PlatformError
 from jdquant.execution.simulator import FeeSchedule
@@ -37,10 +38,12 @@ from jdquant.marketdata.instruments import Instrument
 from jdquant.marketdata.records import Candle
 from jdquant.markets.india import MarketFees, Product
 from jdquant.markets.india import fees_for as market_fees_for
-from jdquant.markets.sessions import session_for
+from jdquant.markets.sessions import FX_VENUES, session_for
 
 PORTFOLIO_SIGNALS = ("xs_momentum", "xs_reversal")
-SHORTABLE = ("ma_cross", "macd", "supertrend", "momentum", "ewmac", "donchian", "ml", "orb")
+FX_ONLY = ("london_breakout",)  # built around the London open: forex and spot metals
+EXCHANGE_ONLY = ("orb", "volume_breakout")  # need an exchange's opening bell or real traded volume
+FX_SLIPPAGE_BPS = Decimal("0.5")  # on top of the half spread charged as a fee
 
 EULER_GAMMA = 0.5772156649
 NSE_TRADING_DAYS = 248
@@ -84,6 +87,8 @@ class Candidate:
                 return f"Breakout: {p['period']}-bar high on volume > {p['k']}σ"
             case "orb":
                 return f"Intraday: opening-range breakout ({p['period']} bars)"
+            case "london_breakout":
+                return f"Session: London-open breakout of the Asian range (entries until +{p['period']} h)"
             case "ewmac":
                 speeds = "/".join(f"{p['fast'] * 2**n}-{p['fast'] * 2**n * 4}" for n in range(3))
                 return f"CTA trend: multi-speed EMA crossover ({speeds}), volatility-scaled"
@@ -131,7 +136,24 @@ def candidate_grid(interval_seconds: int = 86400) -> list[Candidate]:
     if interval_seconds < 86400:  # opening-range breakouts only exist within a session
         bars_30m = max(1, 1800 // interval_seconds)
         grid += [Candidate("orb", (("period", n),)) for n in (bars_30m, bars_30m * 2)]
+    if interval_seconds <= 3600:  # the Asian range needs hourly or finer bars
+        grid += [Candidate("london_breakout", (("period", h),)) for h in (2, 4)]
     return grid
+
+
+def applies(candidate: Candidate, instrument: Instrument) -> bool:
+    """Whether a candidate makes sense for the instrument's market."""
+    fx = instrument.venue in FX_VENUES
+    if candidate.signal in FX_ONLY:
+        return fx
+    return not (fx and candidate.signal in EXCHANGE_ONLY)
+
+
+def slippage_for(instrument: Instrument, config: ResearchConfig) -> Decimal:
+    """Forex fills already pay half the spread as a fee; add only a little for fast markets."""
+    if instrument.venue in FX_VENUES:
+        return min(config.slippage_bps, FX_SLIPPAGE_BPS)
+    return config.slippage_bps
 
 
 def portfolio_grid(size: int, interval_seconds: int = 86400) -> list[Candidate]:
@@ -303,11 +325,12 @@ def research(
             )
             continue
         usable.append(instrument)
-    total, done = len(usable) * len(grid), 0
+    total = sum(1 for instrument in usable for c in grid if applies(c, instrument))
+    done = 0
     evaluations: list[Evaluation] = []
     for instrument in usable:
         series = candles[instrument.instrument_id]
-        for candidate in grid:
+        for candidate in (c for c in grid if applies(c, instrument)):
             if progress:
                 progress(done, total, f"{instrument.instrument_id}: {candidate.label}")
             try:
@@ -382,7 +405,7 @@ def walk_forward(
                 initial_capital=capital,
                 base_currency=instrument.quote_asset,
                 fees=fees_for(instrument, config.product),
-                slippage_bps=config.slippage_bps,
+                slippage_bps=slippage_for(instrument, config),
                 periods_per_year=ppy,
                 models=models,
             )
@@ -391,7 +414,7 @@ def walk_forward(
         fold_curves.append([float(v) for _, v in curve])
         fold_times.append([t for t, _ in curve])
         entries.append(_entries(result))
-        fold_fees.append(float(sum((f.fee for f in result.fills), Decimal(0))))
+        fold_fees.append(float(sum((f.fee for f in result.fills), result.financing)))
         closed += len(result.trades)
         wins += sum(1 for t in result.trades if t.net_pnl > 0)
 
@@ -449,7 +472,7 @@ def walk_forward_portfolio(
         fold_curves.append([float(v) for _, v in curve])
         fold_times.append([t for t, _ in curve])
         entries.append(_entries(result))
-        fold_fees.append(float(sum((f.fee for f in result.fills), Decimal(0))))
+        fold_fees.append(float(sum((f.fee for f in result.fills), result.financing)))
         closed += len(result.trades)
         wins += sum(1 for t in result.trades if t.net_pnl > 0)
     evaluation = _evaluation(group, candidate, fold_curves, fold_times, entries, wins, closed, ppy)
@@ -475,7 +498,7 @@ def _entries(result) -> int:
 def daily_traded_value(instrument: Instrument, series: list[Candle], interval_seconds: int) -> float:
     """Average value traded per session over the last 60 bars (0 when the feed has no volume)."""
     recent = series[-60:]
-    if not recent:
+    if not recent or instrument.venue in FX_VENUES:  # forex volume is a tick count, not traded value
         return 0.0
     per_bar = sum(float(c.volume * c.close * instrument.contract_multiplier) for c in recent) / len(recent)
     bars_per_day = (
@@ -565,8 +588,8 @@ def strategy_parameters(
         stop_loss=str(config.stop_loss),
         take_profit=str(config.take_profit),
         trailing_stop=str(config.trailing_stop),
-        # Futures can be sold short, so trend signals trade both ways there (the CTA way).
-        allow_short=bool(instrument and instrument.is_future and candidate.signal in SHORTABLE),
+        # Futures, forex and margin metals can be sold short, so trend signals trade both ways (the CTA way).
+        allow_short=bool(instrument and instrument.can_short and candidate.signal in SHORTABLE),
     )
     return {k: str(v) if isinstance(v, Decimal) else v for k, v in params.items()}
 

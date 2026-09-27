@@ -111,6 +111,8 @@ class StrategyContext:
         self._models = models
         self.state: dict[str, Any] = {}
         self.logger = logging.getLogger(f"jdquant.strategy.{deployment_id}")
+        # Optional check on orders that open a position (the AI trade monitor): returns False to hold one.
+        self.entry_gate: Any = None
 
     def predict(self, model: str, instrument_id: str) -> float:
         """Score the latest closed bar with the model's PRODUCTION version (Chapter 59)."""
@@ -151,10 +153,15 @@ class StrategyContext:
             if instrument_id is None or o.instrument_id == instrument_id
         ]
 
-    def buy(self, instrument_id: str, quantity: Decimal, limit_price: Decimal | None = None, **kw) -> Order:
+    def buy(
+        self, instrument_id: str, quantity: Decimal, limit_price: Decimal | None = None, **kw
+    ) -> Order | None:
+        """None when an entry gate holds the order back for review."""
         return self._submit(instrument_id, Side.BUY, quantity, limit_price, **kw)
 
-    def sell(self, instrument_id: str, quantity: Decimal, limit_price: Decimal | None = None, **kw) -> Order:
+    def sell(
+        self, instrument_id: str, quantity: Decimal, limit_price: Decimal | None = None, **kw
+    ) -> Order | None:
         return self._submit(instrument_id, Side.SELL, quantity, limit_price, **kw)
 
     def order_target(self, instrument_id: str, target: Decimal) -> Order | None:
@@ -171,21 +178,23 @@ class StrategyContext:
 
     def _submit(
         self, instrument_id: str, side: Side, quantity: Decimal, limit_price: Decimal | None, **kw: Any
-    ) -> Order:
-        return self._oms.submit(
-            OrderRequest(
-                account_id=self.account_id,
-                instrument_id=instrument_id,
-                side=side,
-                order_type=OrderType.LIMIT if limit_price is not None else OrderType.MARKET,
-                quantity=quantity,
-                limit_price=limit_price,
-                deployment_id=self.deployment_id,
-                source=OrderSource.STRATEGY,
-                submitter=f"deployment:{self.deployment_id}",
-                **kw,
-            )
+    ) -> Order | None:
+        request = OrderRequest(
+            account_id=self.account_id,
+            instrument_id=instrument_id,
+            side=side,
+            order_type=OrderType.LIMIT if limit_price is not None else OrderType.MARKET,
+            quantity=quantity,
+            limit_price=limit_price,
+            deployment_id=self.deployment_id,
+            source=OrderSource.STRATEGY,
+            submitter=f"deployment:{self.deployment_id}",
+            **kw,
         )
+        opening = self.position(instrument_id) == 0
+        if opening and self.entry_gate is not None and not self.entry_gate(self, request):
+            return None
+        return self._oms.submit(request)
 
 
 class Strategy:

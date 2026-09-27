@@ -70,6 +70,11 @@ class MarketDataCache:
             return state.quote.mid
         return state.last_trade.price if state.last_trade else None
 
+    def quote(self, instrument_id: str) -> Quote | None:
+        """The latest valid bid/ask, if any."""
+        state = self._state.get(instrument_id)
+        return state.quote if state else None
+
     def status(self, instrument_id: str) -> FeedStatus:
         state = self._state.get(instrument_id)
         if state is None or state.updated_at is None:

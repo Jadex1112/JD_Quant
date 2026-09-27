@@ -110,6 +110,30 @@ def universe(
     return _autopilot(request).universe_options()
 
 
+@router.get("/autopilot/monitor")
+def monitor_status(
+    request: Request, principal: Principal = Depends(require("autopilot:view"))
+) -> dict[str, Any]:
+    """The AI trade monitor: latest verdict per open position, entries waiting, and its track record."""
+    c = ctx(request)
+    monitor = c.services["monitor"]
+    config = c.services["autopilot"].config
+    return {
+        **monitor.status(),
+        "enabled": config.monitor_enabled,
+        "mode": config.monitor_mode,
+        "interval_seconds": config.monitor_interval_seconds,
+        "min_confidence": config.monitor_min_confidence,
+    }
+
+
+@router.post("/autopilot/monitor:run")
+def monitor_run(request: Request, principal: Principal = Depends(require("autopilot:run"))):
+    """Review the open positions now instead of waiting for the next minute."""
+    reviews = ctx(request).services["monitor"].review_now()
+    return {"reviews": [encode(r) for r in reviews]}
+
+
 @router.post("/autopilot/protection:reset")
 @locked
 def reset_protection(

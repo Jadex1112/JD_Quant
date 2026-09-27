@@ -357,6 +357,60 @@ export interface AutopilotConfig {
   halt_cooldown_days: number;
   roll_days: number;
   fx_rates: Record<string, string>;
+  monitor_enabled: boolean;
+  monitor_mode: "advise" | "act";
+  monitor_interval_seconds: number;
+  monitor_min_confidence: number;
+  monitor_entry_gate: boolean;
+  monitor_fallback: "allow" | "block";
+  monitor_cooldown_minutes: number;
+  monitor_max_calls_per_day: number;
+  monitor_reasoning: boolean;
+}
+
+export interface MonitorReview {
+  review_id: string;
+  at: string;
+  kind: "POSITION" | "ENTRY";
+  deployment_id: string;
+  instrument_id: string;
+  mode: string;
+  direction: number;
+  quantity: string;
+  price: string;
+  verdict: "HOLD" | "REDUCE" | "EXIT" | "APPROVE" | "REJECT" | "NO_ANSWER";
+  confidence: number;
+  reason: string;
+  acted: boolean;
+  model: string;
+  label: string;
+  currency: string;
+  moves: Record<string, number | null>;
+}
+
+export interface MonitorScore {
+  judged: number;
+  right: number;
+  accuracy: number | null;
+  value_of_actions_inr: number;
+}
+
+export interface MonitorStatus {
+  enabled: boolean;
+  mode: "advise" | "act";
+  interval_seconds: number;
+  min_confidence: number;
+  available: boolean;
+  provider: string | null;
+  model: string | null;
+  last_run_at: string | null;
+  next_run_at: string | null;
+  last_error: string | null;
+  calls_today: number;
+  pending: { instrument_id: string; side: string; label: string; since: string }[];
+  positions: MonitorReview[];
+  recent: MonitorReview[];
+  scorecard: { "15": MonitorScore; "60": MonitorScore; verdicts: Record<string, number>; acted: number };
 }
 
 export interface UniverseOption {

@@ -17,6 +17,7 @@ from jdquant.connectivity.alpaca import AlpacaAdapter
 from jdquant.connectivity.base import Environment, VenueAdapter, VenueError, VenueTimeout
 from jdquant.connectivity.binance import BinanceSpotAdapter
 from jdquant.connectivity.fyers import FyersAdapter
+from jdquant.connectivity.oanda import OandaAdapter
 from jdquant.core.errors import NotFoundError, PlatformError, ValidationError
 from jdquant.marketdata.instruments import Instrument
 from jdquant.persistence.codec import decode, encode
@@ -31,6 +32,7 @@ ADAPTERS: dict[str, type[VenueAdapter]] = {
     "BINANCE": BinanceSpotAdapter,
     "ALPACA": AlpacaAdapter,
     "FYERS": FyersAdapter,
+    "OANDA": OandaAdapter,
 }
 LOGIN_STATE_TTL = timedelta(minutes=15)
 
@@ -135,13 +137,14 @@ class ConnectionManager:
             self._save(connection)
             return connection
         self._verify(connection, adapter)
+        connection.base_currency = getattr(adapter, "currency", None) or base_currency  # e.g. OANDA's
         instruments = self._sync_instruments(connection, adapter)
         if api_key:
             self._secrets.put(self._secret_name(connection, "key"), api_key)
             self._secrets.put(self._secret_name(connection, "secret"), api_secret or "")
             connection.account_id = f"{venue.lower()}-{connection.connection_id[:8]}"
             self._platform.trading.register_account(
-                TradingAccount(connection.account_id, name, venue, AccountMode.LIVE, base_currency)
+                TradingAccount(connection.account_id, name, venue, AccountMode.LIVE, connection.base_currency)
             )
         connection.instrument_count = len(instruments)
         self._attach(connection, adapter)

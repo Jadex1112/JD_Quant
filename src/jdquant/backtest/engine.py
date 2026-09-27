@@ -22,6 +22,7 @@ from jdquant.execution.simulator import FeeSchedule, FillTiming, SimulatedVenue
 from jdquant.marketdata.cache import MarketDataCache
 from jdquant.marketdata.instruments import Instrument, InstrumentRegistry
 from jdquant.marketdata.records import Candle
+from jdquant.markets.forex import rollover_days
 from jdquant.oms.manager import OrderManager
 from jdquant.oms.orders import Fill, Order
 from jdquant.positions.engine import PositionEngine
@@ -39,6 +40,7 @@ ASSUMPTIONS = (
     "limit orders fill at the limit price when the bar trades strictly through it (BR-25-02)",
     "no latency model; fills are timestamped at the open of the filling bar",
     "spot-style cash accounting for all instruments",
+    "margin products pay overnight financing at each 17:00 New York rollover (three days on Wednesdays)",
 )
 
 
@@ -67,6 +69,7 @@ class BacktestResult:
     metrics: dict[str, Any]
     final_equity: Decimal
     reproducibility_hash: str
+    financing: Decimal = ZERO  # overnight financing paid on margin products (forex, metals)
     assumptions: tuple[str, ...] = ASSUMPTIONS
     strategy_errors: int = 0
 
@@ -194,12 +197,35 @@ def run_backtest(config: BacktestConfig) -> BacktestResult:
 
     last_close: dict[str, Decimal] = {}
     equity_curve: list[tuple[datetime, Decimal]] = []
+    financing = [ZERO]
+    last_ts: list[datetime | None] = [None]
+
+    def charge_financing(until: datetime) -> None:
+        """Positions held across the daily rollover pay financing on their notional."""
+        since, last_ts[0] = last_ts[0], until
+        if since is None:
+            return
+        days = rollover_days(since, until)
+        if not days:
+            return
+        for p in positions.positions():
+            if p.quantity == 0 or p.instrument_id not in last_close:
+                continue
+            instrument = registry.get(p.instrument_id)
+            rate = config.fees.financing_rate(instrument, 1 if p.quantity > 0 else -1)
+            if rate:
+                notional = abs(p.quantity) * last_close[p.instrument_id] * instrument.contract_multiplier
+                cost = notional * rate * days / 365
+                cash[0] -= cost
+                financing[0] += cost
+
     for open_ts, group_iter in groupby(all_candles, key=lambda c: c.open_ts):
         group = list(group_iter)
         clock.set(open_ts)
         for candle in group:
             venue.on_bar(candle)
         clock.set(group[0].close_ts)
+        charge_financing(group[0].close_ts)
         for candle in group:
             market.on_candle(candle)
             history.append(candle)
@@ -223,6 +249,7 @@ def run_backtest(config: BacktestConfig) -> BacktestResult:
         final_equity=equity_curve[-1][1],
         reproducibility_hash=reproducibility_hash(config, strategy_cls),
         strategy_errors=host.error_count,
+        financing=financing[0],
     )
 
 

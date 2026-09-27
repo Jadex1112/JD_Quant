@@ -80,7 +80,45 @@ def demo_instruments() -> list[Instrument]:
             Decimal("0.0001"),
             min_notional=Decimal(5),
         ),
+        *(fx_instrument(symbol) for symbol in DEMO_FX),
     ]
+
+
+# Spot gold and the major currency pairs as quoted by forex brokers (OANDA symbols). Paper trading uses
+# them before a broker is connected; a connected OANDA account replaces them with its own definitions.
+DEMO_FX = ("XAU_USD", "XAG_USD", "EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD", "USD_CAD", "USD_CHF")
+# Rough starting prices for simulated demo quotes only; live prices come from the broker.
+DEMO_PRICES = {
+    "OANDA:XAU_USD": Decimal(4000),
+    "OANDA:XAG_USD": Decimal(48),
+    "OANDA:EUR_USD": Decimal("1.1700"),
+    "OANDA:GBP_USD": Decimal("1.3500"),
+    "OANDA:USD_JPY": Decimal("147.00"),
+    "OANDA:AUD_USD": Decimal("0.6600"),
+    "OANDA:USD_CAD": Decimal("1.3800"),
+    "OANDA:USD_CHF": Decimal("0.8000"),
+    "BINANCE:PAXGUSDT": Decimal(4000),
+    "BINANCE:BTCUSDT": Decimal(110000),
+    "BINANCE:ETHUSDT": Decimal(4000),
+    "NSE:RELIANCE": Decimal(1400),
+}
+
+
+def fx_instrument(symbol: str) -> Instrument:
+    base, quote = symbol.split("_")
+    metal = base in ("XAU", "XAG")
+    tick = {"XAU": "0.01", "XAG": "0.0001"}.get(base) or ("0.001" if quote == "JPY" else "0.00001")
+    return Instrument(
+        "OANDA",
+        symbol,
+        AssetClass.COMMODITY if metal else AssetClass.FX,
+        base,
+        quote,
+        Decimal(tick),
+        Decimal(1),
+        Decimal(1),
+        shortable=True,
+    )
 
 
 @dataclass

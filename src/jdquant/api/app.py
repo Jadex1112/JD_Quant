@@ -63,15 +63,19 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         poller, autopilot = c.services["poller"], c.services["autopilot"]
-        feed = c.services.get("demo_feed")
+        feed, monitor = c.services.get("demo_feed"), c.services.get("monitor")
         if c.settings.background_polling:
             poller.start()
             autopilot.start()
+            if monitor is not None:
+                monitor.start()
             if feed is not None:
                 feed.start()
         yield
         if feed is not None:
             feed.stop()
+        if monitor is not None:
+            monitor.stop()
         autopilot.stop()
         poller.stop()
 

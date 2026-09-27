@@ -9,11 +9,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from jdquant.ai.analyst import analyst_from_env
+from jdquant.ai.analyst import analyst_for, chat_from_env
 from jdquant.ai.copilot import Copilot
 from jdquant.ai.copilot_tools import build_tools
 from jdquant.ai.models import ModelRegistry
 from jdquant.autopilot.engine import Autopilot
+from jdquant.autopilot.monitor import TradeMonitor
 from jdquant.connectivity.connections import ConnectionManager, HttpFactory
 from jdquant.connectivity.poller import VenuePoller
 from jdquant.marketdata.live import LiveMarket, SimulatedFeed
@@ -107,6 +108,7 @@ def build_context(
         runner.sync_all()  # resume RUNNING/PAUSED deployments after a restart (FR-19021)
     live = LiveMarket()
     platform.market.listeners.append(live.on_quote)
+    poller.watched = live.watched
     services = {
         "connections": connections,
         "runner": runner,
@@ -127,6 +129,7 @@ def build_context(
     services["copilot"] = Copilot(
         store, platform.clock, audit, build_tools(context), client_factory=llm_client_factory
     )
+    chat = chat_from_env(services["copilot"], services["copilot"].calls)
     services["autopilot"] = Autopilot(
         platform,
         store,
@@ -137,8 +140,13 @@ def build_context(
         live_ready=lambda account_id: bool(
             (adapter := connections.adapter_for_account(account_id)) and adapter.is_ready()
         ),
-        analyst=analyst_from_env(services["copilot"], services["copilot"].calls),
+        analyst=analyst_for(chat) if chat is not None else None,
     )
+    monitor = TradeMonitor(services["autopilot"], chat, data_source=connections.data_source_for, live=live)
+    services["monitor"] = monitor
+    runner.entry_gate = monitor.gate
+    for hosted in runner.hosted.values():  # deployments resumed before the monitor existed
+        hosted.host.ctx.entry_gate = monitor.gate
     return context
 
 

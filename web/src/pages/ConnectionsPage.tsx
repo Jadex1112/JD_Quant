@@ -254,6 +254,7 @@ function CreateConnection({ onClose }: { onClose: (created?: Connection) => void
   const [product, setProduct] = useState("CNC");
   const [busy, setBusy] = useState(false);
   const fyers = venue === "FYERS";
+  const oanda = venue === "OANDA";
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
@@ -287,10 +288,13 @@ function CreateConnection({ onClose }: { onClose: (created?: Connection) => void
               value={venue}
               onChange={(e) => {
                 setVenue(e.target.value);
-                setBaseCurrency(e.target.value === "ALPACA" ? "USD" : e.target.value === "FYERS" ? "INR" : "USDT");
+                setBaseCurrency(
+                  e.target.value === "ALPACA" || e.target.value === "OANDA" ? "USD" : e.target.value === "FYERS" ? "INR" : "USDT",
+                );
               }}
             >
-              <option value="FYERS">Fyers (NSE stocks, India)</option>
+              <option value="FYERS">Fyers (NSE stocks, MCX, currency futures)</option>
+              <option value="OANDA">OANDA (spot gold XAU/USD, forex)</option>
               <option value="BINANCE">Binance Spot</option>
               <option value="ALPACA">Alpaca (US equities)</option>
             </select>
@@ -308,29 +312,55 @@ function CreateConnection({ onClose }: { onClose: (created?: Connection) => void
               <label className="field">
                 Environment
                 <select value={environment} onChange={(e) => setEnvironment(e.target.value)}>
-                  <option value="TESTNET">Testnet / paper</option>
-                  <option value="PRODUCTION">Production (real money)</option>
+                  <option value="TESTNET">{oanda ? "Practice account (virtual money)" : "Testnet / paper"}</option>
+                  <option value="PRODUCTION">{oanda ? "Live account (real money)" : "Production (real money)"}</option>
                 </select>
               </label>
-              <label className="field">
-                Base currency
-                <input value={baseCurrency} onChange={(e) => setBaseCurrency(e.target.value)} />
-              </label>
+              {!oanda && (
+                <label className="field">
+                  Base currency
+                  <input value={baseCurrency} onChange={(e) => setBaseCurrency(e.target.value)} />
+                </label>
+              )}
             </>
           )}
           <label className="field">
-            {fyers ? "App ID" : "API key"} <span className="small muted">{fyers ? "(e.g. XA1234-100)" : "(optional for market data only)"}</span>
-            <input required={fyers} value={apiKey} onChange={(e) => setApiKey(e.target.value)} spellCheck={false} />
+            {fyers ? "App ID" : oanda ? "API token" : "API key"}{" "}
+            <span className="small muted">{fyers ? "(e.g. XA1234-100)" : oanda ? "(Manage API Access in your OANDA hub)" : "(optional for market data only)"}</span>
+            <input
+              required={fyers || oanda}
+              type={oanda ? "password" : "text"}
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              spellCheck={false}
+              autoComplete="off"
+            />
           </label>
           <label className="field">
-            {fyers ? "Secret key" : "API secret"}
-            <input required={fyers} type="password" value={apiSecret} onChange={(e) => setApiSecret(e.target.value)} autoComplete="new-password" />
+            {fyers ? "Secret key" : oanda ? "Account ID" : "API secret"}
+            {oanda && <span className="small muted"> (e.g. 101-001-1234567-001)</span>}
+            <input
+              required={fyers || oanda}
+              type={oanda ? "text" : "password"}
+              value={apiSecret}
+              onChange={(e) => setApiSecret(e.target.value)}
+              autoComplete={oanda ? "off" : "new-password"}
+              spellCheck={false}
+            />
           </label>
         </div>
         {fyers && (
           <div className="alert">
             Create an app at myapi.fyers.in (API dashboard), then sign in on the next step. Fyers has no test environment: the platform
             uses your Fyers prices for paper trading, and only places real orders when you trade on this account or arm the autopilot.
+          </div>
+        )}
+        {oanda && (
+          <div className="alert warn small">
+            <strong>Indian residents:</strong> RBI rules allow forex trading only in INR pairs and EUR/USD, GBP/USD and USD/JPY on
+            recognised Indian exchanges; leveraged forex or gold trading with overseas brokers is not permitted under FEMA. A practice
+            account uses virtual money with live prices — use it to research and paper trade XAU/USD and forex. For real money, use
+            NSE currency futures or MCX gold through Fyers.
           </div>
         )}
         {!fyers && environment === "PRODUCTION" && (

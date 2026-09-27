@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import threading
 import uuid
 from collections.abc import Callable
@@ -39,12 +40,14 @@ from jdquant.autopilot.strategy import AutopilotStrategy, RotationStrategy
 from jdquant.connectivity.connections import markets_of
 from jdquant.core.errors import PlatformError, ValidationError
 from jdquant.marketdata.instruments import Instrument
+from jdquant.marketdata.live import annual_volatility
 from jdquant.marketdata.records import Candle
 from jdquant.marketdata.synthetic import random_walk_candles
-from jdquant.markets.india import IST, NseCalendar, Product
+from jdquant.markets.india import NseCalendar, Product
+from jdquant.markets.sessions import FX_VENUES, session_for
 from jdquant.persistence.codec import decode, encode
 from jdquant.persistence.store import Store
-from jdquant.platform import Platform
+from jdquant.platform import DEMO_PRICES, Platform
 from jdquant.risk.engine import BreachAction, LimitType, RiskLimit, RiskProfile, Scope
 from jdquant.security.audit import AuditLog
 from jdquant.trading.engine import AccountMode, DeploymentState, TradingAccount
@@ -58,7 +61,21 @@ DECISIONS = "autopilot_decision"
 RUNS = "autopilot_run"
 ACTIVE = (DeploymentState.RUNNING, DeploymentState.PAUSED, DeploymentState.READY)
 VERSIONS = {"autopilot": AutopilotStrategy.version, "rotation": RotationStrategy.version}
-DEFAULT_FX = {"INR": Decimal(1), "USDT": Decimal(85), "USDC": Decimal(85), "USD": Decimal(85)}
+# INR per unit of each quote currency. Where the platform has a live price for the pair (e.g. OANDA
+# USD_JPY), the rate is derived from it instead; otherwise these defaults apply until edited.
+DEFAULT_FX = {
+    "INR": Decimal(1),
+    "USD": Decimal(85),
+    "USDT": Decimal(85),
+    "USDC": Decimal(85),
+    "EUR": Decimal("99.5"),
+    "GBP": Decimal("115"),
+    "JPY": Decimal("0.58"),
+    "CHF": Decimal("106"),
+    "AUD": Decimal("56"),
+    "CAD": Decimal("61.5"),
+    "NZD": Decimal("51"),
+}
 
 
 @dataclass
@@ -100,13 +117,25 @@ class AutopilotConfig:
     roll_days: int = 3  # roll futures this many days before expiry
     # INR per unit of other quote currencies, to size crypto in USDT from an INR budget. Update as rates move.
     fx_rates: dict[str, Decimal] = field(default_factory=lambda: dict(DEFAULT_FX))
+    # AI trade monitor: an LLM reviews every open autopilot position and proposed entry each minute.
+    monitor_enabled: bool = True
+    monitor_mode: str = "advise"  # advise: record verdicts only | act: close, halve or hold back trades
+    monitor_interval_seconds: int = 60
+    monitor_min_confidence: float = 0.7  # verdicts below this confidence are never acted on
+    monitor_entry_gate: bool = True  # in act mode, entries wait for the model's approval
+    monitor_fallback: str = "allow"  # when the model does not answer: allow | block entries
+    monitor_cooldown_minutes: int = 60  # after an AI exit, no re-entry on that instrument for this long
+    monitor_max_calls_per_day: int = 1500
+    monitor_reasoning: bool = True  # let reasoning models think before answering (slower)
 
-    def research_config(self, real_data: bool = True) -> ResearchConfig:
+    def research_config(
+        self, real_data: bool = True, fx_rates: dict[str, Decimal] | None = None
+    ) -> ResearchConfig:
         return ResearchConfig(
             max_cost_share=self.max_cost_share,
             vol_target=self.vol_target,
             max_participation=self.max_participation if real_data else 0.0,
-            fx_rates={**DEFAULT_FX, **self.fx_rates},
+            fx_rates=fx_rates or {**DEFAULT_FX, **self.fx_rates},
             interval_seconds=self.interval_seconds,
             capital=self.capital,
             stop_loss=self.stop_loss,
@@ -378,6 +407,14 @@ class Autopilot:
             problems.append({"field": "max_weight", "message": "between 0 and 1"})
         if config.data_source not in ("auto", "venue", "synthetic"):
             problems.append({"field": "data_source", "message": "auto, venue or synthetic"})
+        if config.monitor_mode not in ("advise", "act"):
+            problems.append({"field": "monitor_mode", "message": "advise or act"})
+        if config.monitor_fallback not in ("allow", "block"):
+            problems.append({"field": "monitor_fallback", "message": "allow or block"})
+        if not 30 <= config.monitor_interval_seconds <= 3600:
+            problems.append({"field": "monitor_interval_seconds", "message": "between 30 and 3600"})
+        if not 0 <= config.monitor_min_confidence <= 1:
+            problems.append({"field": "monitor_min_confidence", "message": "between 0 and 1"})
         if config.history_bars < 400:
             problems.append({"field": "history_bars", "message": "at least 400 bars"})
         if problems:
@@ -449,13 +486,29 @@ class Autopilot:
         if self.last_run_at is None:
             return now
         if self.config.interval_seconds >= 86400:
-            # Daily bars: research once per trading day, after the close.
-            day = self.last_run_at.astimezone(IST).date()
-            while True:
-                day += timedelta(days=1)
-                if self.calendar.is_trading_day(day):
-                    return datetime.combine(day, self.calendar.close_time, IST) + timedelta(minutes=30)
+            # Daily bars: research once per trading day, 30 minutes after the last market in the
+            # universe closes (NSE 15:30 IST, forex 17:00 New York, crypto midnight UTC).
+            return max(self._next_close(s, self.last_run_at) for s in self._sessions()) + timedelta(
+                minutes=30
+            )
         return self.last_run_at + timedelta(hours=self.config.cycle_hours)
+
+    def _sessions(self) -> set:
+        sessions = set()
+        for universe_id in self.config.universe:
+            instrument = self.resolve(universe_id)
+            if instrument is not None:
+                sessions.add(session_for(instrument))
+        return sessions or {self.calendar}
+
+    @staticmethod
+    def _next_close(session, after: datetime) -> datetime:
+        day = after.astimezone(session.tz).date()
+        while True:
+            close = session.session_close(day)
+            if close > after and session.is_trading_day(day):
+                return close
+            day += timedelta(days=1)
 
     def start(self, interval: float = 30.0) -> None:
         if self._thread is None:
@@ -546,7 +599,8 @@ class Autopilot:
             self.progress.update(done=done, total=total, message=message)
 
         real = sources == {"broker history"}
-        result = research(instruments, candles, config.research_config(real_data=real), progress=progress)
+        research_config = config.research_config(real_data=real, fx_rates=self.fx_rates())
+        result = research(instruments, candles, research_config, progress=progress)
         result.skipped.update(unresolved)
         run.trials, run.skipped = result.trials, result.skipped
         ranked = sorted(result.evaluations, key=lambda e: e.score, reverse=True)
@@ -620,14 +674,23 @@ class Autopilot:
         end = self._p.clock.now()
         start = end - timedelta(seconds=interval * config.history_bars)
         start = start.replace(microsecond=0)
-        reference = self._p.market.reference_price(instrument.instrument_id) or Decimal(1000)
+        reference = (
+            self._p.market.reference_price(instrument.instrument_id)
+            or DEMO_PRICES.get(instrument.instrument_id)
+            or Decimal(1000)
+        )
+        volatility = 0.015
+        if instrument.venue in FX_VENUES:  # quieter markets: scale to the bar size
+            bars = session_for(instrument).bars_per_year(interval)
+            volatility = annual_volatility(instrument) / math.sqrt(bars) * 2
+            drift *= volatility / 0.015
         return random_walk_candles(
             instrument,
             start,
             config.history_bars,
             interval_seconds=interval,
             start_price=reference,
-            volatility=0.015,
+            volatility=volatility,
             drift=drift,
             seed=seed,
         )
@@ -1145,6 +1208,25 @@ class Autopilot:
             deployment_id=rolled.deployment_id,
         )
 
+    def fx_rates(self) -> dict[str, Decimal]:
+        """INR per unit of each currency: live cross rates where the platform prices the pair.
+
+        The dollar rate itself (and USDT) comes from the settings, since INR pairs are not quoted by
+        forex brokers; every other currency is converted through the dollar at its live price.
+        """
+        rates = {**DEFAULT_FX, **self.config.fx_rates}
+        usd = rates["USD"]
+        for currency in list(rates):
+            if currency in ("INR", "USD", "USDT", "USDC"):
+                continue
+            direct = self._p.market.reference_price(f"OANDA:{currency}_USD")
+            inverse = self._p.market.reference_price(f"OANDA:USD_{currency}")
+            if direct:
+                rates[currency] = (usd * direct).quantize(Decimal("0.0001"))
+            elif inverse:
+                rates[currency] = (usd / inverse).quantize(Decimal("0.0001"))
+        return rates
+
     def _mark(self, m: Managed) -> None:
         pnl = Decimal(0)
         for p in self._p.positions.positions(deployment_id=m.deployment_id, open_only=False):
@@ -1152,7 +1234,7 @@ class Autopilot:
             price = self._p.market.reference_price(p.instrument_id)
             if p.quantity and price is not None:
                 pnl += p.unrealized_pnl(price)
-        rate = {**DEFAULT_FX, **self.config.fx_rates}.get(m.currency, Decimal(1))
+        rate = self.fx_rates().get(m.currency, Decimal(1))
         pnl = (pnl * rate).quantize(Decimal("0.01"))  # into the budget currency
         m.pnl = pnl
         if pnl > m.peak_pnl:
