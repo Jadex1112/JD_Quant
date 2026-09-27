@@ -10,6 +10,7 @@ import { AutopilotPage } from "./pages/AutopilotPage";
 import { ConnectionsPage } from "./pages/ConnectionsPage";
 import { Dashboard } from "./pages/Dashboard";
 import { MarketsPage } from "./pages/MarketsPage";
+import { LabPage } from "./pages/LabPage";
 import { ResearchPage } from "./pages/ResearchPage";
 import { RiskPage } from "./pages/RiskPage";
 import { StrategiesPage } from "./pages/StrategiesPage";
@@ -51,6 +52,7 @@ export function App() {
           <Route path="/trading" element={<TradingPage />} />
           <Route path="/markets" element={<MarketsPage />} />
           <Route path="/strategies" element={<StrategiesPage />} />
+          <Route path="/lab" element={<LabPage />} />
           <Route path="/research" element={<ResearchPage />} />
           <Route path="/risk" element={<RiskPage />} />
           <Route path="/ai" element={<AiPage />} />

@@ -14,6 +14,7 @@ from jdquant.ai.copilot import Copilot
 from jdquant.ai.copilot_tools import build_tools
 from jdquant.ai.models import ModelRegistry
 from jdquant.autopilot.engine import Autopilot
+from jdquant.autopilot.lab import StrategyLab
 from jdquant.autopilot.monitor import TradeMonitor
 from jdquant.connectivity.connections import ConnectionManager, HttpFactory
 from jdquant.connectivity.poller import VenuePoller
@@ -144,6 +145,7 @@ def build_context(
     )
     monitor = TradeMonitor(services["autopilot"], chat, data_source=connections.data_source_for, live=live)
     services["monitor"] = monitor
+    services["lab"] = StrategyLab(platform, store, services["autopilot"], chat, runner)
     runner.entry_gate = monitor.gate
     for hosted in runner.hosted.values():  # deployments resumed before the monitor existed
         hosted.host.ctx.entry_gate = monitor.gate

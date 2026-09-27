@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, Field, PlainSerializer
 
@@ -144,6 +144,10 @@ class BacktestIn(BaseModel):
     slippage_bps: Dec = Decimal(1)
     risk_limits: list[RiskLimitIn] = Field(default_factory=list)
     data: SyntheticDataIn
+    # "history": the broker's candles for the instrument (bars and interval from `data`); else synthetic.
+    data_source: Literal["synthetic", "history"] = "synthetic"
+    # "market": the instrument's real charges (Indian taxes, crypto fee, forex spread); else flat bps.
+    fees_model: Literal["flat", "market"] = "flat"
 
 
 class TradeOut(BaseModel):

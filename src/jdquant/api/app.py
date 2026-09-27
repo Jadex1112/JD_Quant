@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from jdquant import __version__
 from jdquant.api.context import AppContext, Settings, build_context
 from jdquant.api.deps import Forbidden, Unauthenticated
-from jdquant.api.routes import admin, ai, auth, autopilot, connections, market, research, trading
+from jdquant.api.routes import admin, ai, auth, autopilot, connections, lab, market, research, trading
 from jdquant.core.errors import NotFoundError, PlatformError, ValidationError
 from jdquant.platform import Platform
 
@@ -119,7 +119,7 @@ def create_app(
             "maintenance_mode": trading_engine.maintenance_mode,
         }
 
-    for module in (auth, admin, trading, research, connections, ai, autopilot, market):
+    for module in (auth, admin, trading, research, connections, ai, autopilot, market, lab):
         app.include_router(module.router)
     _mount_web(app, c.settings.web_dir or WEB_DIST)
     return app

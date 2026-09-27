@@ -19,6 +19,7 @@ const NAV: { group: string; items: { to: string; label: string; permission: stri
   {
     group: "Research",
     items: [
+      { to: "/lab", label: "Strategy lab", permission: "backtest:run" },
       { to: "/research", label: "Backtests", permission: "backtest:run" },
       { to: "/ai", label: "AI models", permission: "model:view" },
     ],

@@ -687,13 +687,16 @@ class Autopilot:
                 raise PlatformError("DATA_UNAVAILABLE", f"no broker history for {instrument.instrument_id}")
         return self._synthetic(instrument), "synthetic demo data"
 
-    def _synthetic(self, instrument: Instrument) -> list[Candle]:
+    def _synthetic(
+        self, instrument: Instrument, interval: int | None = None, bars: int | None = None
+    ) -> list[Candle]:
         config = self.config
         seed = int(hashlib.sha256(instrument.instrument_id.encode()).hexdigest()[:8], 16)
         drift = ((seed % 21) - 8) / 10_000  # a per-instrument tilt so some series trend and some do not
-        interval = config.interval_seconds
+        interval = interval or config.interval_seconds
+        bars = bars or config.history_bars
         end = self._p.clock.now()
-        start = end - timedelta(seconds=interval * config.history_bars)
+        start = end - timedelta(seconds=interval * bars)
         start = start.replace(microsecond=0)
         reference = (
             self._p.market.reference_price(instrument.instrument_id)
@@ -702,13 +705,13 @@ class Autopilot:
         )
         volatility = 0.015
         if instrument.venue in FX_VENUES:  # quieter markets: scale to the bar size
-            bars = session_for(instrument).bars_per_year(interval)
-            volatility = annual_volatility(instrument) / math.sqrt(bars) * 2
+            per_year = session_for(instrument).bars_per_year(interval)
+            volatility = annual_volatility(instrument) / math.sqrt(per_year) * 2
             drift *= volatility / 0.015
         return random_walk_candles(
             instrument,
             start,
-            config.history_bars,
+            bars,
             interval_seconds=interval,
             start_price=reference,
             volatility=volatility,

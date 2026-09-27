@@ -591,3 +591,79 @@ export interface AutopilotDecision {
   run_id: string | null;
   actor: string;
 }
+
+// ---- strategy lab -------------------------------------------------------------------------------
+
+export type RuleSpec = Record<string, unknown>;
+
+export interface Translation {
+  spec: RuleSpec;
+  description: string[];
+  assumptions: string[];
+  unsupported: string[];
+  model: string;
+}
+
+export interface LabCheck {
+  name: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface LabRun {
+  run_id: string;
+  at: string;
+  user_id: string;
+  instrument_id: string;
+  interval_seconds: number;
+  bars: number;
+  spec: RuleSpec;
+  description: string[];
+  text: string;
+  assumptions: string[];
+  unsupported: string[];
+  data_source: string;
+  capital: string;
+  capital_quote: string;
+  currency: string;
+  leverage: string;
+  results: {
+    return: number | null;
+    sharpe: number | null;
+    max_drawdown: number | null;
+    volatility: number | null;
+    trades: number;
+    win_rate: number | null;
+    profit_factor: number | null;
+    benchmark_return: number | null;
+    charges: number;
+    charges_share: number | null;
+    periods: number[];
+    bars: number;
+    leverage_used: string;
+    leverage_cap: string;
+    strategy_errors: number;
+  };
+  confidence: {
+    score: number;
+    grade: "High" | "Medium" | "Low";
+    dsr: number | null;
+    trials: number;
+    probability_of_profit: number | null;
+    synthetic: boolean;
+    checks: LabCheck[];
+  };
+  equity?: [string, number][];
+  trades?: {
+    direction: string;
+    quantity: string;
+    entry_time: string;
+    exit_time: string;
+    entry_price: string;
+    exit_price: string;
+    net_pnl: string;
+  }[];
+  review: { summary: string; strengths: string[]; weaknesses: string[]; suggestions: string[] } | null;
+  model: string;
+  deployment_id: string | null;
+}

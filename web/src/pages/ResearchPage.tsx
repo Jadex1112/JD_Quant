@@ -1,7 +1,8 @@
 import { lazy, Suspense, useEffect, useState } from "react";
-import { get, post, type Backtest, type Instrument, type StrategyTemplate } from "../api";
+import { NavLink } from "react-router-dom";
+import { get, post, type Backtest, type Deployment, type Instrument, type StrategyTemplate } from "../api";
 import { useApp } from "../app-state";
-import { Empty, Section, useData } from "../components/ui";
+import { Dialog, Empty, Section, useData } from "../components/ui";
 import { num, pct, ratio, signed, time, tone } from "../format";
 
 // The charting library is large; load it only when a result is shown.
@@ -36,6 +37,12 @@ export function ResearchPage() {
   const [slippage, setSlippage] = useState("1");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<Backtest | null>(null);
+  const [dataSource, setDataSource] = useState<"synthetic" | "history">("synthetic");
+  const [feesModel, setFeesModel] = useState<"flat" | "market">("market");
+  const [tested, setTested] = useState<{ strategy: string; instrumentId: string; parameters: Record<string, unknown>; interval: number } | null>(
+    null,
+  );
+  const [paperFor, setPaperFor] = useState(false);
 
   const template = (templates.data ?? []).find((t) => t.name === strategy);
   useEffect(() => {
@@ -67,6 +74,8 @@ export function ResearchPage() {
         maker_fee_bps: fees,
         taker_fee_bps: fees,
         slippage_bps: slippage,
+        data_source: dataSource,
+        fees_model: feesModel,
         data: {
           start: "2025-01-01T00:00:00Z",
           bars: Number(bars),
@@ -78,7 +87,10 @@ export function ResearchPage() {
         },
       }),
     );
-    if (out) setResult(out);
+    if (out) {
+      setResult(out);
+      setTested({ strategy, instrumentId, parameters, interval: Number(intervalSeconds) });
+    }
     setBusy(false);
   };
 
@@ -112,6 +124,22 @@ export function ResearchPage() {
                 </label>
               ))}
           </div>
+          <div className="form-grid">
+            <label className="field">
+              Price data
+              <select value={dataSource} onChange={(e) => setDataSource(e.target.value as "synthetic" | "history")}>
+                <option value="synthetic">Synthetic random walk (reproducible)</option>
+                <option value="history">Broker history (real prices)</option>
+              </select>
+            </label>
+            <label className="field">
+              Charges
+              <select value={feesModel} onChange={(e) => setFeesModel(e.target.value as "flat" | "market")}>
+                <option value="market">The market&apos;s real charges (taxes, fees, spread)</option>
+                <option value="flat">A flat fee in basis points</option>
+              </select>
+            </label>
+          </div>
           <details>
             <summary className="small">Data and costs</summary>
             <div className="form-grid" style={{ marginTop: 10 }}>
@@ -136,8 +164,84 @@ export function ResearchPage() {
         </form>
       </Section>
 
+      {result && tested && (
+        <div className="alert small row" style={{ justifyContent: "space-between" }}>
+          <span>
+            Like the result? Paper trade <strong>{tested.strategy}</strong> on {tested.instrumentId} with live prices, no real money.
+            Want to describe a strategy in your own words instead? Try the <NavLink to="/lab">Strategy lab</NavLink>.
+          </span>
+          <button className="primary" onClick={() => setPaperFor(true)}>
+            Paper trade this…
+          </button>
+        </div>
+      )}
       {result ? <BacktestResult result={result} /> : <Empty>Run a backtest to see its equity curve and metrics.</Empty>}
+      {paperFor && tested && <PaperDialog tested={tested} onClose={() => setPaperFor(false)} />}
     </div>
+  );
+}
+
+function PaperDialog({
+  tested,
+  onClose,
+}: {
+  tested: { strategy: string; instrumentId: string; parameters: Record<string, unknown>; interval: number };
+  onClose: () => void;
+}) {
+  const { accounts, run } = useApp();
+  const paper = accounts.filter((a) => a.mode === "PAPER");
+  const [accountId, setAccountId] = useState(paper[0]?.account_id ?? "");
+  const [interval, setIntervalSeconds] = useState(String(tested.interval));
+  const [done, setDone] = useState<Deployment | null>(null);
+  const start = async () => {
+    const deployment = await run(async () => {
+      const created = await post<Deployment>("/deployments", {
+        strategy: tested.strategy,
+        account_id: accountId,
+        instruments: [tested.instrumentId],
+        parameters: tested.parameters,
+        interval_seconds: Number(interval),
+      });
+      await post(`/deployments/${created.deployment_id}:approve`);
+      return post<Deployment>(`/deployments/${created.deployment_id}:start`);
+    }, "Paper trading started");
+    if (deployment) setDone(deployment);
+  };
+  return (
+    <Dialog title="Paper trade this strategy" onClose={onClose}>
+      {done ? (
+        <div className="stack">
+          <p style={{ margin: 0 }}>
+            <strong>{done.strategy_name}</strong> is running on <strong>{done.account_id}</strong> with live prices. Follow it under{" "}
+            <NavLink to="/strategies" onClick={onClose}>Strategies</NavLink>.
+          </p>
+          <div className="row end">
+            <button onClick={onClose}>Close</button>
+          </div>
+        </div>
+      ) : (
+        <div className="stack">
+          <p className="small muted" style={{ margin: 0 }}>
+            The same strategy and parameters, on {tested.instrumentId}, trading live prices on a paper account.
+          </p>
+          <div className="form-grid">
+            <label className="field">
+              Paper account
+              <select value={accountId} onChange={(e) => setAccountId(e.target.value)}>
+                {paper.map((a) => (
+                  <option key={a.account_id} value={a.account_id}>{a.name} ({a.account_id})</option>
+                ))}
+              </select>
+            </label>
+            <Field label="Bar size (seconds)" value={interval} set={setIntervalSeconds} />
+          </div>
+          <div className="row end">
+            <button onClick={onClose}>Cancel</button>
+            <button className="primary" onClick={start} disabled={!accountId}>Start paper trading</button>
+          </div>
+        </div>
+      )}
+    </Dialog>
   );
 }
 

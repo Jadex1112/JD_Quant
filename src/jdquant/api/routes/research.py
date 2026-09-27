@@ -9,8 +9,10 @@ from fastapi import APIRouter, Depends, Request
 from jdquant.api.deps import ctx, require
 from jdquant.api.schemas import BacktestIn, BacktestOut, StrategyTemplateOut, TradeOut
 from jdquant.backtest.engine import BacktestConfig, run_backtest
+from jdquant.core.errors import PlatformError
 from jdquant.execution.simulator import FeeSchedule
 from jdquant.marketdata.synthetic import random_walk_candles
+from jdquant.markets.india import MarketFees
 from jdquant.risk.engine import RiskLimit
 from jdquant.security.identity import Principal
 from jdquant.strategy.templates import TEMPLATES
@@ -47,15 +49,28 @@ def create_backtest(
     c = ctx(request)
     instrument = c.platform.instruments.get(body.instrument_id)
     d = body.data
-    candles = random_walk_candles(
-        instrument,
-        d.start,
-        d.bars,
-        interval_seconds=d.interval_seconds,
-        start_price=d.start_price,
-        volatility=d.volatility,
-        drift=d.drift,
-        seed=d.seed,
+    if body.data_source == "history":
+        loader = c.services["autopilot"]._venue_candles
+        candles = loader(instrument, d.interval_seconds, d.bars) if loader is not None else None
+        if not candles:
+            raise PlatformError(
+                "DATA_UNAVAILABLE",
+                f"no broker history for {instrument.instrument_id} at {d.interval_seconds}s bars; "
+                "connect its broker under Connections or use synthetic data",
+            )
+    else:
+        candles = random_walk_candles(
+            instrument,
+            d.start,
+            d.bars,
+            interval_seconds=d.interval_seconds,
+            start_price=d.start_price,
+            volatility=d.volatility,
+            drift=d.drift,
+            seed=d.seed,
+        )
+    fees = (
+        MarketFees() if body.fees_model == "market" else FeeSchedule(body.maker_fee_bps, body.taker_fee_bps)
     )
     result = run_backtest(
         BacktestConfig(
@@ -64,7 +79,7 @@ def create_backtest(
             candles={instrument.instrument_id: candles},
             parameters=body.parameters,
             initial_capital=body.initial_capital,
-            fees=FeeSchedule(body.maker_fee_bps, body.taker_fee_bps),
+            fees=fees,
             slippage_bps=body.slippage_bps,
             risk_limits=[RiskLimit(r.limit_type, r.threshold) for r in body.risk_limits],
             seed=d.seed,
