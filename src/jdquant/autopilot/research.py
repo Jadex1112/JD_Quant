@@ -168,6 +168,8 @@ class ResearchConfig:
     max_positions: int = 5
     max_weight: float = 0.4
     vol_target: Decimal = Decimal("0.2")  # annualized volatility per position, as systematic funds size risk
+    # Reject strategies whose transaction charges eat more than this share of their gross profit.
+    max_cost_share: float = 0.5
     # Largest position as a share of daily traded value; 0 disables (synthetic data has no real volume).
     max_participation: float = 0.0
     # Budget currency units per unit of each quote currency (e.g. INR per USDT), to size non-INR markets.
@@ -285,11 +287,22 @@ def research(
     usable, skipped = [], {}
     minimum = config.warmup + config.folds * 30
     for instrument in instruments:
-        n = len(candles.get(instrument.instrument_id, []))
-        if n < minimum:
-            skipped[instrument.instrument_id] = f"only {n} bars of history; at least {minimum} are needed"
-        else:
-            usable.append(instrument)
+        series = candles.get(instrument.instrument_id, [])
+        if len(series) < minimum:
+            skipped[instrument.instrument_id] = (
+                f"only {len(series)} bars of history; at least {minimum} are needed"
+            )
+            continue
+        # Positions are never levered: a futures lot's full notional must fit one position's budget.
+        lot_value = series[-1].close * instrument.lot_size * instrument.contract_multiplier
+        per_position = config.capital_for(instrument) * Decimal(str(config.max_weight))
+        if lot_value > per_position:
+            skipped[instrument.instrument_id] = (
+                f"one lot is worth {lot_value:,.0f} {instrument.quote_asset}, more than the "
+                f"{per_position:,.0f} a single position may use; raise the budget or the per-position share"
+            )
+            continue
+        usable.append(instrument)
     total, done = len(usable) * len(grid), 0
     evaluations: list[Evaluation] = []
     for instrument in usable:
@@ -349,6 +362,7 @@ def walk_forward(
     capital = config.capital_for(instrument)
     fold_curves: list[list[float]] = []
     fold_times: list[list[datetime]] = []
+    fold_fees: list[float] = []
     entries, wins, closed = [], 0, 0
     for fold_start, fold_end in fold_bounds(len(series), config):
         params = strategy_parameters(candidate, capital, config, instrument)
@@ -377,12 +391,14 @@ def walk_forward(
         fold_curves.append([float(v) for _, v in curve])
         fold_times.append([t for t, _ in curve])
         entries.append(_entries(result))
+        fold_fees.append(float(sum((f.fee for f in result.fills), Decimal(0))))
         closed += len(result.trades)
         wins += sum(1 for t in result.trades if t.net_pnl > 0)
 
     evaluation = _evaluation(
         instrument.instrument_id, candidate, fold_curves, fold_times, entries, wins, closed, ppy
     )
+    _add_costs(evaluation, fold_curves, fold_fees)
     evaluation.validation["daily_value"] = daily_traded_value(instrument, series, config.interval_seconds)
     evaluation.validation["position_value"] = float(capital) * config.max_weight
     return evaluation
@@ -402,6 +418,7 @@ def walk_forward_portfolio(
     timeline = sorted({c.open_ts for m in members for c in candles[m.instrument_id]})
     fold_curves: list[list[float]] = []
     fold_times: list[list[datetime]] = []
+    fold_fees: list[float] = []
     entries, wins, closed = [], 0, 0
     for fold_start, fold_end in fold_bounds(len(timeline), config):
         first, last = timeline[fold_start - config.warmup], timeline[fold_end - 1]
@@ -432,9 +449,11 @@ def walk_forward_portfolio(
         fold_curves.append([float(v) for _, v in curve])
         fold_times.append([t for t, _ in curve])
         entries.append(_entries(result))
+        fold_fees.append(float(sum((f.fee for f in result.fills), Decimal(0))))
         closed += len(result.trades)
         wins += sum(1 for t in result.trades if t.net_pnl > 0)
     evaluation = _evaluation(group, candidate, fold_curves, fold_times, entries, wins, closed, ppy)
+    _add_costs(evaluation, fold_curves, fold_fees)
     evaluation.instruments = [m.instrument_id for m in members]
     return evaluation
 
@@ -465,6 +484,22 @@ def daily_traded_value(instrument: Instrument, series: list[Candle], interval_se
         else max(1, session_for(instrument).seconds_per_day // interval_seconds)
     )
     return per_bar * bars_per_day
+
+
+def _add_costs(e: Evaluation, fold_curves: list[list[float]], fold_fees: list[float]) -> None:
+    """Transaction charges paid in each period and the share of the gross profit they consumed."""
+    periods = (
+        ("validation", fold_curves[:-1], fold_fees[:-1]),
+        ("holdout", fold_curves[-1:], fold_fees[-1:]),
+    )
+    for name, curves, fees in periods:
+        stats = getattr(e, name)
+        net, charges = sum(c[-1] - c[0] for c in curves), sum(fees)
+        gross = net + charges
+        stats["charges"] = charges
+        stats["net_profit"] = net
+        stats["charges_pct_capital"] = charges / curves[0][0] if curves and curves[0][0] else 0.0
+        stats["charges_share"] = charges / gross if gross > 0 else None
 
 
 def _evaluation(
@@ -626,6 +661,12 @@ def _apply_gates(e: Evaluation, config: ResearchConfig) -> None:
         reasons.append(f"likely luck: deflated Sharpe confidence {_fmt(e.dsr)} below {config.min_dsr}")
     if config.require_positive_holdout and not (h["return"] is not None and h["return"] > 0):
         reasons.append(f"lost money in the unseen holdout period ({_fmt(h['return'], pct=True)})")
+    share = v.get("charges_share")
+    if share is not None and share > config.max_cost_share:
+        reasons.append(
+            f"charges would eat {share:.0%} of the gross profit (limit {config.max_cost_share:.0%}); "
+            "it trades too often for its edge"
+        )
     daily, position = v.get("daily_value") or 0, v.get("position_value") or 0
     if config.max_participation > 0 and daily > 0 and position > daily * config.max_participation:
         reasons.append(

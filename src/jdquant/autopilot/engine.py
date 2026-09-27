@@ -17,7 +17,6 @@ import hashlib
 import json
 import logging
 import threading
-import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -25,6 +24,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+from jdquant.ai.analyst import Analyst, AnalystReport
 from jdquant.ai.training import TrainingConfig, train
 from jdquant.autopilot.research import (
     Candidate,
@@ -45,6 +45,7 @@ from jdquant.markets.india import IST, NseCalendar, Product
 from jdquant.persistence.codec import decode, encode
 from jdquant.persistence.store import Store
 from jdquant.platform import Platform
+from jdquant.risk.engine import BreachAction, LimitType, RiskLimit, RiskProfile, Scope
 from jdquant.security.audit import AuditLog
 from jdquant.trading.engine import AccountMode, DeploymentState, TradingAccount
 
@@ -83,7 +84,15 @@ class AutopilotConfig:
     max_deployment_drawdown: float = 0.15  # of allocated capital, then the deployment is closed out
     min_paper_days: int = 10
     min_paper_trades: int = 2
-    explain_with_claude: bool = True
+    use_analyst: bool = True  # an LLM reviews each cycle and writes the briefing
+    analyst_can_veto: bool = False  # a high-severity analyst concern blocks that strategy (never adds risk)
+    # Capital protection. The book may lose at most `loss_floor` of its budget; once it is in profit the
+    # floor rises to keep `lock_in_gains` of the peak gain. New positions shrink as the cushion above the
+    # floor shrinks, and at the floor everything goes to cash until the owner resets protection.
+    loss_floor: float = 0.10
+    lock_in_gains: float = 0.5
+    daily_loss_limit: float = 0.03  # of the budget per account per day, enforced by the risk engine
+    max_cost_share: float = 0.5  # reject strategies whose charges eat more of the gross profit than this
     vol_target: Decimal = Decimal("0.2")  # annualized volatility each position is sized to
     max_participation: float = 0.01  # largest position as a share of daily traded value (real data only)
     portfolio_drawdown_limit: float = 0.10  # of the budget: cut the whole book to cash beyond this
@@ -94,6 +103,7 @@ class AutopilotConfig:
 
     def research_config(self, real_data: bool = True) -> ResearchConfig:
         return ResearchConfig(
+            max_cost_share=self.max_cost_share,
             vol_target=self.vol_target,
             max_participation=self.max_participation if real_data else 0.0,
             fx_rates={**DEFAULT_FX, **self.fx_rates},
@@ -189,9 +199,10 @@ class Run:
     skipped: dict[str, str] = field(default_factory=dict)
     summary: str | None = None
     error: str | None = None
+    analyst: str | None = None  # provider and model that reviewed the cycle
+    concerns: list[dict[str, Any]] = field(default_factory=list)
 
 
-Summarizer = Callable[[dict[str, Any]], str | None]
 CandleLoader = Callable[[Instrument, int, int], list[Candle] | None]
 
 
@@ -206,7 +217,7 @@ class Autopilot:
         models: Any = None,
         venue_candles: CandleLoader | None = None,
         live_ready: Callable[[str], bool] | None = None,
-        summarizer: Summarizer | None = None,
+        analyst: Analyst | None = None,
         calendar: NseCalendar | None = None,
     ):
         self._p = platform
@@ -216,7 +227,7 @@ class Autopilot:
         self._models = models
         self._venue_candles = venue_candles
         self._live_ready = live_ready or (lambda account_id: True)
-        self._summarizer = summarizer
+        self._analyst = analyst
         self.calendar = calendar or NseCalendar()
         self.config = decode(AutopilotConfig, store.get(KIND, "config") or encode(AutopilotConfig()))
         self.live = self._load_live(store.get(KIND, "live") or {})
@@ -235,6 +246,7 @@ class Autopilot:
         self.halted_until: dict[str, datetime] = {
             k: datetime.fromisoformat(v) for k, v in state.get("halted_until", {}).items()
         }
+        self.floor_hit: dict[str, bool] = dict(state.get("floor_hit", {}))
         self.progress: dict[str, Any] = {"running": False}
         self._decision_seq = store.query("SELECT COUNT(*) AS n FROM documents WHERE kind = ?", (DECISIONS,))[
             0
@@ -247,6 +259,7 @@ class Autopilot:
                 platform.trading.register_account(
                     TradingAccount(PAPER_AI_ACCOUNT, "AI paper", "PAPER", AccountMode.PAPER, "INR")
                 )
+            self.apply_risk_limits()
 
     @staticmethod
     def _load_live(doc: dict[str, Any]) -> LiveArming:
@@ -270,8 +283,32 @@ class Autopilot:
                 "last_run_at": self.last_run_at.isoformat() if self.last_run_at else None,
                 "peaks": {k: str(v) for k, v in self.peaks.items()},
                 "halted_until": {k: v.isoformat() for k, v in self.halted_until.items()},
+                "floor_hit": self.floor_hit,
             },
         )
+
+    def apply_risk_limits(self) -> None:
+        """Daily loss limits on the autopilot's accounts, enforced order by order by the risk engine."""
+        risk = self._p.risk
+        accounts = {PAPER_AI_ACCOUNT: self.config.capital}
+        accounts.update({a.account_id: a.capital_cap for a in self.live.accounts.values()})
+        mine = [
+            RiskProfile(
+                f"autopilot:{account_id}",
+                Scope.ACCOUNT,
+                [
+                    RiskLimit(
+                        LimitType.MAX_DAILY_LOSS,
+                        (budget * Decimal(str(self.config.daily_loss_limit))).quantize(Decimal(1)),
+                        BreachAction.REDUCE_ONLY,
+                    )
+                ],
+                target_id=account_id,
+            )
+            for account_id, budget in accounts.items()
+            if budget > 0 and self.config.daily_loss_limit > 0
+        ]
+        risk.set_profiles([p for p in risk.profiles if not p.name.startswith("autopilot:")] + mine)
 
     # ---- universe -----------------------------------------------------------------------------
 
@@ -347,6 +384,8 @@ class Autopilot:
             raise ValidationError("AUTOPILOT_CONFIG_INVALID", problems)
         self.config = config
         self._store.put(KIND, "config", encode(config))
+        with self._p.lock:
+            self.apply_risk_limits()
         self._audit.record(actor=actor, action="autopilot.configure", category="CONFIGURATION", data=changes)
         return config
 
@@ -364,6 +403,8 @@ class Autopilot:
             account_id, capital_cap, actor, self._p.clock.now(), allow_futures
         )
         self._store.put(KIND, "live", encode(self.live))
+        with self._p.lock:
+            self.apply_risk_limits()
         reasons = ["Paper deployments that meet the track-record rules can now be promoted to real orders."]
         if allow_futures:
             reasons.append(
@@ -382,6 +423,7 @@ class Autopilot:
         self._store.put(KIND, "live", encode(self.live))
         closed = []
         with self._p.lock:
+            self.apply_risk_limits()
             for m in list(self.managed.values()):
                 if (
                     m.mode == "LIVE"
@@ -519,6 +561,12 @@ class Autopilot:
             for s in result.selections
         ]
 
+        if config.use_analyst and self._analyst is not None:
+            self.progress.update(message="analyst reviewing the results")
+            report = self._analyst(self._review_briefing(result, run))
+            if report is not None:
+                self._apply_report(report, result, run)
+
         with self._p.lock:
             self._review(result, run)
             self._deploy(result, candles, run)
@@ -530,8 +578,29 @@ class Autopilot:
             [f"Data: {run.data_source}"] + [f"Skipped {k}: {v}" for k, v in list(result.skipped.items())[:5]],
             run_id=run.run_id,
         )
-        if config.explain_with_claude and self._summarizer is not None:
-            run.summary = self._summarizer(self._briefing(run))
+
+    def _apply_report(self, report: AnalystReport, result: ResearchResult, run: Run) -> None:
+        run.analyst = f"{report.provider} · {report.model}"
+        run.summary = report.summary or None
+        run.concerns = [encode(c) for c in report.concerns]
+        if not self.config.analyst_can_veto:
+            return
+        vetoed = {c.instrument_id: c.concern for c in report.concerns if c.severity == "high"}
+        kept = []
+        for selection in result.selections:
+            e = selection.evaluation
+            reason = vetoed.get(e.instrument_id)
+            if reason is None:
+                kept.append(selection)
+                continue
+            self._decide(
+                "SKIP",
+                f"Analyst vetoed {e.candidate.label} on {e.instrument_id}",
+                [f"{report.provider} flagged a high-severity concern: {reason}"],
+                instrument_id=e.instrument_id,
+                run_id=run.run_id,
+            )
+        result.selections = kept
 
     def _load(self, instrument: Instrument) -> tuple[list[Candle], str]:
         config = self.config
@@ -591,6 +660,15 @@ class Autopilot:
                 self._retire(m, ["its edge no longer holds up on fresh data:", *e.reasons], run)
 
     def _deploy(self, result: ResearchResult, candles: dict[str, list[Candle]], run: Run) -> None:
+        if self.floor_hit.get("PAPER"):
+            self._decide(
+                "SKIP",
+                "New paper deployments stopped: the loss floor was reached",
+                ["reset capital protection in the autopilot settings to trade again"],
+                run_id=run.run_id,
+            )
+            return
+        exposure = self.protection("PAPER")["exposure"]
         if self._halted("PAPER"):
             self._decide(
                 "SKIP",
@@ -606,7 +684,7 @@ class Autopilot:
             e = selection.evaluation
             if covered & set(e.instruments):
                 continue  # one autopilot strategy per instrument; the incumbent passed review
-            capital = min(selection.capital, self.config.capital - used)
+            capital = min((selection.capital * exposure).quantize(Decimal(1)), self.config.capital - used)
             if capital <= 0:
                 self._decide(
                     "SKIP",
@@ -646,7 +724,11 @@ class Autopilot:
             self._decide(
                 "DEPLOY",
                 f"Paper trading {e.candidate.label} on {e.instrument_id} with {capital:,}",
-                [_evidence(e), f"weight {selection.weight:.0%} of the budget from risk-parity allocation"],
+                [
+                    _evidence(e),
+                    f"weight {selection.weight:.0%} of the budget from risk-parity allocation"
+                    + (f", scaled to {exposure:.0%} by the loss floor" if exposure < 1 else ""),
+                ],
                 instrument_id=e.instrument_id,
                 deployment_id=managed.deployment_id,
                 run_id=run.run_id,
@@ -749,7 +831,7 @@ class Autopilot:
 
     def _promote(self, run: Run) -> None:
         now = self._p.clock.now()
-        if self._halted("LIVE"):
+        if self._halted("LIVE") or self.floor_hit.get("LIVE"):
             return
         for m in list(self.managed.values()):
             if m.mode != "PAPER" or m.status != "ACTIVE" or m.live_deployment:
@@ -895,20 +977,77 @@ class Autopilot:
             for mode in ("PAPER", "LIVE"):
                 self._check_book(mode)
 
+    def _budget(self, mode: str) -> Decimal:
+        if mode == "PAPER":
+            return self.config.capital
+        return sum((a.capital_cap for a in self.live.accounts.values()), Decimal(0))
+
+    def protection(self, mode: str) -> dict[str, Any]:
+        """Loss floor, cushion and the share of normal position sizes the book may still take."""
+        budget = self._budget(mode)
+        total = sum((m.pnl for m in self.managed.values() if m.mode == mode), Decimal(0))
+        peak = max(self.peaks.get(mode, Decimal(0)), total)
+        floor = budget * (1 - Decimal(str(self.config.loss_floor)))
+        if peak > 0:  # lock in part of the best gain so far
+            floor = max(floor, budget + peak * Decimal(str(self.config.lock_in_gains)))
+        equity = budget + total
+        room = budget * Decimal(str(self.config.loss_floor))
+        exposure = max(Decimal(0), min(Decimal(1), (equity - floor) / room)) if room > 0 else Decimal(1)
+        return {
+            "budget": budget,
+            "equity": equity,
+            "floor": floor.quantize(Decimal("0.01")),
+            "cushion": (equity - floor).quantize(Decimal("0.01")),
+            "exposure": exposure.quantize(Decimal("0.01")),
+            "floor_hit": bool(self.floor_hit.get(mode)),
+        }
+
+    def reset_protection(self, mode: str, actor: str) -> None:
+        """Start protection afresh from the current results (after a floor stop, at the owner's request)."""
+        total = sum((m.pnl for m in self.managed.values() if m.mode == mode), Decimal(0))
+        for m in self.managed.values():
+            if m.mode == mode and m.status != "ACTIVE":
+                m.pnl = m.peak_pnl = Decimal(0)  # settled history no longer counts against the new floor
+                self._save(m)
+        self.floor_hit[mode] = False
+        self.peaks[mode] = Decimal(0)
+        self.halted_until.pop(mode, None)
+        self._save_state()
+        self._decide(
+            "ARM" if mode == "LIVE" else "KEEP",
+            f"Capital protection reset for the {mode.lower()} book",
+            [f"cumulative result before the reset: {total:,.2f}; the floor is measured from here"],
+            actor=actor,
+        )
+
     def _check_book(self, mode: str) -> None:
-        """Portfolio-level stop: if the book falls too far from its peak, go to cash and pause."""
+        """Book-level stops: the loss floor (with locked-in gains) and the drawdown-from-peak limit."""
         book = [m for m in self.managed.values() if m.mode == mode]
         if not book:
             return
         total = sum((m.pnl for m in book), Decimal(0))
-        if mode == "PAPER":
-            budget = self.config.capital
-        else:
-            budget = sum((a.capital_cap for a in self.live.accounts.values()), Decimal(0))
+        budget = self._budget(mode)
         peak = max(self.peaks.get(mode, Decimal(0)), total)
         self.peaks[mode] = peak
-        limit = Decimal(str(self.config.portfolio_drawdown_limit))
         active = [m for m in book if m.status == "ACTIVE"]
+        guard = self.protection(mode)
+        if active and not self.floor_hit.get(mode) and guard["equity"] <= guard["floor"]:
+            for m in active:
+                self._close(m, "loss floor reached")
+            self.floor_hit[mode] = True
+            self._decide(
+                "HALT",
+                f"{mode.title()} book at its loss floor: everything moved to cash",
+                [
+                    f"equity {guard['equity']:,.2f} reached the floor {guard['floor']:,.2f} "
+                    f"({self.config.loss_floor:.0%} of the budget, raised to keep "
+                    f"{self.config.lock_in_gains:.0%} of gains)",
+                    "no new positions until capital protection is reset",
+                ],
+            )
+            self._save_state()
+            return
+        limit = Decimal(str(self.config.portfolio_drawdown_limit))
         if budget > 0 and active and (peak - total) / budget > limit:
             for m in active:
                 self._close(m, "portfolio drawdown limit")
@@ -1085,6 +1224,7 @@ class Autopilot:
             "config": encode(self.config),
             "live": encode(self.live),
             "halted_until": {k: v.isoformat() for k, v in self.halted_until.items() if self._halted(k)},
+            "protection": {mode: encode(self.protection(mode)) for mode in ("PAPER", "LIVE")},
             "progress": dict(self.progress),
             "last_run_at": self.last_run_at.isoformat() if self.last_run_at else None,
             "next_run_at": (n.isoformat() if (n := self.next_run_at()) else None),
@@ -1125,21 +1265,34 @@ class Autopilot:
         if self._runner is not None:
             self._runner.sync(deployment)
 
-    def _briefing(self, run: Run) -> dict[str, Any]:
-        decisions = [encode(d) for d in self.decisions(40) if d.run_id == run.run_id]
+    def _review_briefing(self, result: ResearchResult, run: Run) -> dict[str, Any]:
+        keys = ("return", "sharpe", "max_drawdown", "trades", "positive_folds", "charges", "charges_share")
+
+        def brief(e: Evaluation) -> dict[str, Any]:
+            return {
+                "instrument_id": e.instrument_id,
+                "strategy": e.candidate.label,
+                "validation": {k: e.validation.get(k) for k in keys},
+                "holdout": {k: e.holdout.get(k) for k in ("return", "sharpe", "trades", "charges")},
+                "fold_returns": e.fold_returns,
+                "luck_adjusted_confidence": e.dsr,
+            }
+
+        rejected = sorted(
+            (e for e in result.evaluations if not e.passed), key=lambda e: e.score, reverse=True
+        )
         return {
             "data_source": run.data_source,
-            "strategies_tested": run.trials,
-            "selected": [
-                {k: s[k] for k in ("instrument_id", "label", "validation", "holdout", "dsr", "capital")}
-                for s in run.selected
+            "strategies_tested": result.trials,
+            "budget": str(self.config.capital),
+            "selected": [{**brief(s.evaluation), "capital": str(s.capital)} for s in result.selections],
+            "best_rejected": [{**brief(e), "reasons": e.reasons} for e in rejected[:5]],
+            "running": [
+                {"instrument_id": m.instrument_id, "strategy": m.label, "mode": m.mode, "pnl": str(m.pnl)}
+                for m in self.managed.values()
+                if m.status == "ACTIVE"
             ],
-            "best_rejected": [
-                {k: e[k] for k in ("instrument_id", "label", "reasons")}
-                for e in run.leaderboard
-                if not e["passed"]
-            ][:5],
-            "decisions": [{k: d[k] for k in ("kind", "title", "reasons")} for d in decisions],
+            "protection": {k: str(v) for k, v in self.protection("PAPER").items()},
             "live_trading_armed_accounts": sorted(self.live.accounts),
         }
 
@@ -1159,39 +1312,3 @@ def _downsample(points: list[tuple[datetime, float]], limit: int) -> list[list[A
     if points and sampled[-1] is not points[-1]:
         sampled.append(points[-1])
     return [[t.isoformat(), round(v, 5)] for t, v in sampled]
-
-
-def make_summarizer(copilot: Any) -> Summarizer:
-    """Plain-language briefing of a cycle from Claude; returns None if Claude is not configured or fails."""
-    from jdquant.ai.copilot import FALLBACK_BETA
-    from jdquant.ai.prompts import AUTOPILOT_SUMMARY
-
-    def summarize(briefing: dict[str, Any]) -> str | None:
-        started = time.monotonic()
-        try:
-            client = copilot._ensure_client()
-            response = client.beta.messages.create(
-                model=copilot.model,
-                max_tokens=2000,
-                system=AUTOPILOT_SUMMARY.text,
-                messages=[{"role": "user", "content": json.dumps(briefing, default=str)}],
-                betas=[FALLBACK_BETA],
-                fallbacks="default",
-            )
-        except Exception as exc:
-            log.info("autopilot summary unavailable: %s", exc)
-            return None
-        usage = getattr(response, "usage", None)
-        copilot.calls.record(
-            user_id=AUTOPILOT,
-            template=AUTOPILOT_SUMMARY,
-            model=copilot.model,
-            input_tokens=getattr(usage, "input_tokens", 0) or 0,
-            output_tokens=getattr(usage, "output_tokens", 0) or 0,
-            latency_ms=int((time.monotonic() - started) * 1000),
-            outcome=getattr(response, "stop_reason", None) or "unknown",
-        )
-        text = "".join(getattr(b, "text", "") for b in response.content if getattr(b, "type", "") == "text")
-        return text.strip() or None
-
-    return summarize

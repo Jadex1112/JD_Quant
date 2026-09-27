@@ -9,10 +9,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from jdquant.ai.analyst import analyst_from_env
 from jdquant.ai.copilot import Copilot
 from jdquant.ai.copilot_tools import build_tools
 from jdquant.ai.models import ModelRegistry
-from jdquant.autopilot.engine import Autopilot, make_summarizer
+from jdquant.autopilot.engine import Autopilot
 from jdquant.connectivity.connections import ConnectionManager, HttpFactory
 from jdquant.connectivity.poller import VenuePoller
 from jdquant.persistence.store import Store
@@ -116,7 +117,7 @@ def build_context(
         live_ready=lambda account_id: bool(
             (adapter := connections.adapter_for_account(account_id)) and adapter.is_ready()
         ),
-        summarizer=make_summarizer(services["copilot"]),
+        analyst=analyst_from_env(services["copilot"], services["copilot"].calls),
     )
     return context
 

@@ -83,7 +83,7 @@ def test_state_survives_restart(db):
     pos = p2.positions.get_or_create(PAPER_ACCOUNT_ID, BTC, f"MANUAL:{PAPER_ACCOUNT_ID}")
     assert pos.quantity == Decimal("0.3")
     assert pos.average_entry_price == Decimal(50000)
-    assert pos.realized_pnl == 0 and pos.fees_paid == Decimal(35)
+    assert pos.realized_pnl == 0 and pos.fees_paid == Decimal("41.3")  # 0.1% fee + 18% GST on it
     assert p2.trading.deployments[dep.deployment_id].state is DeploymentState.RUNNING
     assert p2.trading.kill_switches[switch.kill_switch_id].active
 

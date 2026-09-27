@@ -9,6 +9,7 @@ from jdquant.marketdata.instruments import AssetClass, Instrument
 
 IST = timezone(timedelta(hours=5, minutes=30), "IST")
 CRYPTO = (AssetClass.CRYPTO_SPOT, AssetClass.CRYPTO_PERPETUAL, AssetClass.CRYPTO_FUTURE)
+GOLD_TOKENS = ("PAXG", "XAUT")  # one token = one troy ounce of gold, priced in dollars: an XAU/USD proxy
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,8 @@ def session_for(instrument: Instrument) -> MarketSession:
 
 def asset_group(instrument: Instrument) -> str:
     """Human grouping used by the autopilot and the UI."""
+    if instrument.asset_class in CRYPTO and instrument.base_asset in GOLD_TOKENS:
+        return "Gold · XAU/USD (tokenized)"
     if instrument.asset_class in CRYPTO:
         return "Crypto"
     if instrument.asset_class is AssetClass.FX:

@@ -68,6 +68,18 @@ def demo_instruments() -> list[Instrument]:
         Instrument(
             "NSE", "RELIANCE", AssetClass.EQUITY, "RELIANCE", "INR", Decimal("0.05"), Decimal(1), Decimal(1)
         ),
+        # Tokenized gold: one PAXG is one troy ounce, so PAXG/USDT tracks XAU/USD.
+        Instrument(
+            "BINANCE",
+            "PAXGUSDT",
+            AssetClass.CRYPTO_SPOT,
+            "PAXG",
+            "USDT",
+            Decimal("0.01"),
+            Decimal("0.0001"),
+            Decimal("0.0001"),
+            min_notional=Decimal(5),
+        ),
     ]
 
 

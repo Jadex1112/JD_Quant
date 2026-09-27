@@ -122,14 +122,39 @@ CURRENCY_FEES = IndiaDerivativeFees(
 )
 
 
+@dataclass(frozen=True)
+class CryptoExchangeFees(FeeSchedule):
+    """Spot crypto: exchange fee plus 18% GST on that fee, as charged to Indian users (approximate).
+
+    The 1% TDS deducted on crypto sales in India is a tax prepayment credited against the tax bill, not a
+    charge, so it is not modelled here; it does tie up cash until the return is filed.
+    """
+
+    rate: Decimal = Decimal("0.001")  # Binance spot taker fee without discounts
+    gst: Decimal = Decimal("0.18")
+
+    def fee(
+        self, instrument: Instrument, side: Side, quantity: Decimal, price: Decimal, liquidity: Liquidity
+    ) -> Decimal:
+        return instrument.notional(quantity, price) * self.rate * (1 + self.gst)
+
+    def fingerprint(self) -> list[str]:
+        return [type(self).__name__, str(self.rate), str(self.gst)]
+
+
+CRYPTO_FEES = CryptoExchangeFees()
+
+
 def fees_for(instrument: Instrument, product: Product = Product.CNC) -> FeeSchedule:
-    """The charges model for an instrument's market (flat 10 bps outside India)."""
+    """The charges model for an instrument's market (flat 10 bps where no local model exists)."""
     if instrument.venue == "MCX":
         return MCX_FEES
     if instrument.venue == "NSE" and instrument.asset_class is AssetClass.FX:
         return CURRENCY_FEES
     if instrument.venue == "NSE":
         return IndiaEquityFees(product=product)
+    if instrument.venue == "BINANCE":
+        return CRYPTO_FEES
     return FeeSchedule()
 
 

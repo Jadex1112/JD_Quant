@@ -20,10 +20,16 @@ router = APIRouter(prefix="/api/v1", tags=["autopilot"])
 class ArmIn(BaseModel):
     account_id: str
     capital_cap: Decimal = Field(gt=0)
+    allow_futures: bool = False
 
 
 class DisarmIn(BaseModel):
+    account_id: str | None = None  # None disarms every account
     flatten: bool = True
+
+
+class ResetIn(BaseModel):
+    mode: str = Field(default="PAPER", pattern="^(PAPER|LIVE)$")
 
 
 def _autopilot(request: Request) -> Autopilot:
@@ -82,9 +88,34 @@ def decisions(
 @locked
 def arm(body: ArmIn, request: Request, principal: Principal = Depends(require("autopilot:arm"))):
     """Allow the autopilot to promote proven paper strategies to real orders, up to a capital cap."""
-    return encode(_autopilot(request).arm_live(body.account_id, body.capital_cap, principal.user_id))
+    return encode(
+        _autopilot(request).arm_live(
+            body.account_id, body.capital_cap, principal.user_id, allow_futures=body.allow_futures
+        )
+    )
 
 
 @router.post("/autopilot/live:disarm")
 def disarm(body: DisarmIn, request: Request, principal: Principal = Depends(require("autopilot:disarm"))):
-    return encode(_autopilot(request).disarm_live(principal.user_id, flatten=body.flatten))
+    return encode(
+        _autopilot(request).disarm_live(principal.user_id, account_id=body.account_id, flatten=body.flatten)
+    )
+
+
+@router.get("/autopilot/universe")
+def universe(
+    request: Request, principal: Principal = Depends(require("autopilot:view"))
+) -> list[dict[str, Any]]:
+    """Everything the universe may contain, grouped by asset class; futures as rolling front months."""
+    return _autopilot(request).universe_options()
+
+
+@router.post("/autopilot/protection:reset")
+@locked
+def reset_protection(
+    body: ResetIn, request: Request, principal: Principal = Depends(require("autopilot:arm"))
+):
+    """Resume after a loss-floor stop. Privileged: it lets the autopilot risk money again."""
+    autopilot = _autopilot(request)
+    autopilot.reset_protection(body.mode, principal.user_id)
+    return encode(autopilot.protection(body.mode))
