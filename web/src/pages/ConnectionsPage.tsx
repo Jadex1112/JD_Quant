@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { get, post, put, type Connection } from "../api";
 import { useApp } from "../app-state";
 import { Confirm, Dialog, Empty, Section, StatusBadge, useData } from "../components/ui";
@@ -12,13 +13,26 @@ interface Balance {
 }
 
 export function ConnectionsPage() {
-  const { can, run, refreshAccounts } = useApp();
+  const { can, run, refreshAccounts, notify } = useApp();
   const connections = useData(() => get<Connection[]>("/connections"), [], 5000);
   const [creating, setCreating] = useState(false);
   const [rotating, setRotating] = useState<Connection | null>(null);
   const [watch, setWatch] = useState<Connection | null>(null);
   const [disabling, setDisabling] = useState<Connection | null>(null);
   const [balances, setBalances] = useState<{ c: Connection; rows: Balance[] } | null>(null);
+  const [signIn, setSignIn] = useState<Connection | null>(null);
+  const [pinFor, setPinFor] = useState<Connection | null>(null);
+  const [params, setParams] = useSearchParams();
+
+  useEffect(() => {
+    // The broker sends the browser back here after sign-in.
+    const outcome = params.get("login");
+    if (!outcome) return;
+    if (outcome === "ok") notify("Signed in to the broker. The connection is live.");
+    else notify(`Broker sign-in failed: ${params.get("reason") ?? "unknown error"}`, true);
+    setParams({}, { replace: true });
+    refreshAccounts().catch(() => undefined);
+  }, [params, setParams, notify, refreshAccounts]);
 
   const done = () => {
     connections.reload();
@@ -74,10 +88,23 @@ export function ConnectionsPage() {
                     <td className="small">{c.account_id ?? "—"}</td>
                     <td className="num">{c.instrument_count}</td>
                     <td className="small">{c.watchlist.join(", ") || "—"}</td>
-                    <td className="small">{time(c.last_tested_at)}</td>
+                    <td className="small">
+                      {time(c.last_tested_at)}
+                      {c.requires_login && c.session_expires_at && (
+                        <div className="muted">session until {time(c.session_expires_at)}</div>
+                      )}
+                    </td>
                     <td>
                       <span className="row">
-                        {can("connection:update") && c.status !== "DISABLED" && (
+                        {c.requires_login && c.status !== "DISABLED" && can("connection:update") && (
+                          <button className={`small ${c.status === "LOGIN_REQUIRED" ? "primary" : ""}`} onClick={() => setSignIn(c)}>
+                            {c.status === "LOGIN_REQUIRED" ? "Sign in" : "Sign in again"}
+                          </button>
+                        )}
+                        {c.requires_login && c.account_id && can("connection:rotate") && (
+                          <button className="small" onClick={() => setPinFor(c)}>PIN</button>
+                        )}
+                        {can("connection:update") && c.status !== "DISABLED" && c.status !== "LOGIN_REQUIRED" && (
                           <button
                             className="small"
                             onClick={async () => {
@@ -102,7 +129,7 @@ export function ConnectionsPage() {
                             Balances
                           </button>
                         )}
-                        {can("connection:rotate") && (
+                        {can("connection:rotate") && !c.requires_login && (
                           <button className="small" onClick={() => setRotating(c)}>Rotate keys</button>
                         )}
                         {can("connection:update") && c.status !== "DISABLED" && (
@@ -124,8 +151,19 @@ export function ConnectionsPage() {
 
       {creating && (
         <CreateConnection
-          onClose={() => {
+          onClose={(created) => {
             setCreating(false);
+            done();
+            if (created?.requires_login) setSignIn(created);
+          }}
+        />
+      )}
+      {signIn && <BrokerSignIn connection={signIn} onClose={() => setSignIn(null)} />}
+      {pinFor && (
+        <PinDialog
+          connection={pinFor}
+          onClose={() => {
+            setPinFor(null);
             done();
           }}
         />
@@ -205,15 +243,17 @@ export function ConnectionsPage() {
   );
 }
 
-function CreateConnection({ onClose }: { onClose: () => void }) {
+function CreateConnection({ onClose }: { onClose: (created?: Connection) => void }) {
   const { run } = useApp();
   const [name, setName] = useState("");
-  const [venue, setVenue] = useState("BINANCE");
+  const [venue, setVenue] = useState("FYERS");
   const [environment, setEnvironment] = useState("TESTNET");
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
-  const [baseCurrency, setBaseCurrency] = useState("USDT");
+  const [baseCurrency, setBaseCurrency] = useState("INR");
+  const [product, setProduct] = useState("CNC");
   const [busy, setBusy] = useState(false);
+  const fyers = venue === "FYERS";
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
@@ -222,18 +262,19 @@ function CreateConnection({ onClose }: { onClose: () => void }) {
         post<Connection>("/connections", {
           name,
           venue,
-          environment,
+          environment: fyers ? "PRODUCTION" : environment,
           api_key: apiKey || null,
           api_secret: apiSecret || null,
-          base_currency: baseCurrency,
+          base_currency: fyers ? "INR" : baseCurrency,
+          settings: fyers ? { product } : {},
         }),
-      "Connection added",
+      fyers ? "Fyers app saved — sign in to finish" : "Connection added",
     );
     setBusy(false);
-    if (created) onClose();
+    if (created) onClose(created);
   };
   return (
-    <Dialog title="Add connection" onClose={onClose}>
+    <Dialog title="Add connection" onClose={() => onClose()}>
       <form className="stack" onSubmit={submit} autoComplete="off">
         <div className="form-grid">
           <label className="field">
@@ -246,42 +287,61 @@ function CreateConnection({ onClose }: { onClose: () => void }) {
               value={venue}
               onChange={(e) => {
                 setVenue(e.target.value);
-                setBaseCurrency(e.target.value === "ALPACA" ? "USD" : "USDT");
+                setBaseCurrency(e.target.value === "ALPACA" ? "USD" : e.target.value === "FYERS" ? "INR" : "USDT");
               }}
             >
+              <option value="FYERS">Fyers (NSE stocks, India)</option>
               <option value="BINANCE">Binance Spot</option>
               <option value="ALPACA">Alpaca (US equities)</option>
             </select>
           </label>
+          {fyers ? (
+            <label className="field">
+              Product
+              <select value={product} onChange={(e) => setProduct(e.target.value)}>
+                <option value="CNC">Delivery (CNC)</option>
+                <option value="INTRADAY">Intraday</option>
+              </select>
+            </label>
+          ) : (
+            <>
+              <label className="field">
+                Environment
+                <select value={environment} onChange={(e) => setEnvironment(e.target.value)}>
+                  <option value="TESTNET">Testnet / paper</option>
+                  <option value="PRODUCTION">Production (real money)</option>
+                </select>
+              </label>
+              <label className="field">
+                Base currency
+                <input value={baseCurrency} onChange={(e) => setBaseCurrency(e.target.value)} />
+              </label>
+            </>
+          )}
           <label className="field">
-            Environment
-            <select value={environment} onChange={(e) => setEnvironment(e.target.value)}>
-              <option value="TESTNET">Testnet / paper</option>
-              <option value="PRODUCTION">Production (real money)</option>
-            </select>
+            {fyers ? "App ID" : "API key"} <span className="small muted">{fyers ? "(e.g. XA1234-100)" : "(optional for market data only)"}</span>
+            <input required={fyers} value={apiKey} onChange={(e) => setApiKey(e.target.value)} spellCheck={false} />
           </label>
           <label className="field">
-            Base currency
-            <input value={baseCurrency} onChange={(e) => setBaseCurrency(e.target.value)} />
-          </label>
-          <label className="field">
-            API key <span className="small muted">(optional for market data only)</span>
-            <input value={apiKey} onChange={(e) => setApiKey(e.target.value)} spellCheck={false} />
-          </label>
-          <label className="field">
-            API secret
-            <input type="password" value={apiSecret} onChange={(e) => setApiSecret(e.target.value)} autoComplete="new-password" />
+            {fyers ? "Secret key" : "API secret"}
+            <input required={fyers} type="password" value={apiSecret} onChange={(e) => setApiSecret(e.target.value)} autoComplete="new-password" />
           </label>
         </div>
-        {environment === "PRODUCTION" && (
+        {fyers && (
+          <div className="alert">
+            Create an app at myapi.fyers.in (API dashboard), then sign in on the next step. Fyers has no test environment: the platform
+            uses your Fyers prices for paper trading, and only places real orders when you trade on this account or arm the autopilot.
+          </div>
+        )}
+        {!fyers && environment === "PRODUCTION" && (
           <div className="alert warn">
             Orders sent through a production connection trade real funds. Risk limits and kill switches still apply.
           </div>
         )}
         <div className="row end">
-          <button type="button" onClick={onClose}>Cancel</button>
+          <button type="button" onClick={() => onClose()}>Cancel</button>
           <button className="primary" type="submit" disabled={busy}>
-            {busy ? "Connecting…" : "Add and test"}
+            {busy ? "Connecting…" : fyers ? "Save and continue" : "Add and test"}
           </button>
         </div>
       </form>
@@ -346,6 +406,82 @@ function WatchlistDialog({ connection, onClose }: { connection: Connection; onCl
         <div className="row end">
           <button type="button" onClick={onClose}>Cancel</button>
           <button className="primary" type="submit">Save</button>
+        </div>
+      </form>
+    </Dialog>
+  );
+}
+
+function BrokerSignIn({ connection, onClose }: { connection: Connection; onClose: () => void }) {
+  const { run } = useApp();
+  const [login, setLogin] = useState<{ login_url: string; redirect_uri: string } | null>(null);
+  const started = useRef(false);
+  const close = useRef(onClose);
+  close.current = onClose;
+  useEffect(() => {
+    if (started.current) return; // one sign-in link per dialog, however often the page re-renders
+    started.current = true;
+    run(() => post<{ login_url: string; redirect_uri: string }>(`/connections/${connection.connection_id}:login`)).then((out) => {
+      if (out) setLogin(out);
+      else close.current();
+    });
+  }, [connection.connection_id, run]);
+  return (
+    <Dialog title={`Sign in to ${connection.venue === "FYERS" ? "Fyers" : connection.venue}`} onClose={onClose}>
+      {!login ? (
+        <p className="muted">Preparing sign-in…</p>
+      ) : (
+        <div className="stack">
+          <p style={{ margin: 0 }}>
+            In your Fyers app settings, the <strong>Redirect URL</strong> must be exactly:
+          </p>
+          <code style={{ display: "block", padding: 8, background: "var(--surface-2)", borderRadius: 6, overflowWrap: "anywhere" }}>
+            {login.redirect_uri}
+          </code>
+          <p className="small muted" style={{ margin: 0 }}>
+            You will sign in on fyers.in and come back here automatically. The link works once and expires in 15 minutes.
+          </p>
+          <div className="row end">
+            <button type="button" onClick={onClose}>Cancel</button>
+            <a className="button primary" href={login.login_url}>Continue to Fyers</a>
+          </div>
+        </div>
+      )}
+    </Dialog>
+  );
+}
+
+function PinDialog({ connection, onClose }: { connection: Connection; onClose: () => void }) {
+  const { run } = useApp();
+  const [pin, setPin] = useState("");
+  const save = async (value: string | null) => {
+    const ok = await run(
+      () => put(`/connections/${connection.connection_id}/pin`, { pin: value }),
+      value ? "PIN saved — sessions renew automatically" : "PIN removed",
+    );
+    if (ok) onClose();
+  };
+  return (
+    <Dialog title="Unattended session renewal" onClose={onClose}>
+      <form
+        className="stack"
+        onSubmit={(e) => {
+          e.preventDefault();
+          save(pin);
+        }}
+      >
+        <p className="small" style={{ margin: 0 }}>
+          Fyers sessions end every day. With your 4-digit Fyers PIN stored (encrypted), the platform renews the session itself for up to
+          15 days, so the autopilot keeps trading without you signing in each morning. Without it, you sign in daily.
+        </p>
+        <label className="field">
+          Fyers PIN
+          <input required type="password" inputMode="numeric" pattern="[0-9]{4,6}" value={pin} onChange={(e) => setPin(e.target.value)}
+            autoComplete="off" />
+        </label>
+        <div className="row end">
+          <button type="button" onClick={() => save(null)}>Remove stored PIN</button>
+          <button className="primary" type="submit">Save PIN</button>
         </div>
       </form>
     </Dialog>

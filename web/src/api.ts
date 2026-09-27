@@ -102,6 +102,11 @@ export interface Account {
   mode: "LIVE" | "PAPER";
   base_currency: string;
   status: string;
+  markets: string[]; // instrument venues it can trade; ["*"] for paper accounts
+}
+
+export function accountTrades(account: Account | undefined, instrument: Instrument): boolean {
+  return !account || account.markets.includes("*") || account.markets.includes(instrument.venue);
 }
 
 export interface Instrument {
@@ -248,6 +253,10 @@ export interface Connection {
   last_tested_at: string | null;
   instrument_count: number;
   watchlist: string[];
+  settings: Record<string, unknown>;
+  requires_login: boolean;
+  session_expires_at: string | null;
+  markets: string[];
 }
 
 export interface User {
@@ -310,4 +319,114 @@ export interface ConversationView {
   created_at: string;
   transcript: TranscriptEntry[];
   pending_actions: PendingAction[];
+}
+
+// ---- autopilot ----------------------------------------------------------------------------------
+
+export interface AutopilotConfig {
+  enabled: boolean;
+  universe: string[];
+  data_source: "auto" | "venue" | "synthetic";
+  interval_seconds: number;
+  history_bars: number;
+  capital: string;
+  max_positions: number;
+  max_weight: number;
+  product: "CNC" | "INTRADAY";
+  stop_loss: string;
+  take_profit: string;
+  trailing_stop: string;
+  slippage_bps: string;
+  min_sharpe: number;
+  max_drawdown: number;
+  min_dsr: number;
+  min_trades: number;
+  cycle_hours: number;
+  max_deployment_drawdown: number;
+  min_paper_days: number;
+  min_paper_trades: number;
+  explain_with_claude: boolean;
+}
+
+export interface PeriodStats {
+  return: number | null;
+  sharpe: number | null;
+  max_drawdown: number | null;
+  trades: number;
+  win_rate?: number | null;
+  positive_folds?: number;
+  bars: number;
+}
+
+export interface EvaluationSummary {
+  instrument_id: string;
+  candidate: string;
+  label: string;
+  signal: string;
+  validation: PeriodStats;
+  holdout: PeriodStats;
+  fold_returns: number[];
+  dsr: number | null;
+  passed: boolean;
+  reasons: string[];
+}
+
+export interface SelectedStrategy extends EvaluationSummary {
+  weight: number;
+  capital: string;
+  equity: [string, number][];
+}
+
+export interface AutopilotRun {
+  run_id: string;
+  started_at: string;
+  finished_at: string | null;
+  data_source: string;
+  trials: number;
+  leaderboard: EvaluationSummary[];
+  selected: SelectedStrategy[];
+  skipped: Record<string, string>;
+  summary: string | null;
+  error: string | null;
+}
+
+export interface ManagedDeployment {
+  deployment_id: string;
+  instrument_id: string;
+  candidate: string;
+  label: string;
+  signal: string;
+  mode: "PAPER" | "LIVE";
+  capital: string;
+  created_at: string;
+  status: "ACTIVE" | "CLOSING" | "RETIRED";
+  pnl: string;
+  peak_pnl: string;
+  model: string | null;
+  source_deployment: string | null;
+  live_deployment: string | null;
+  expected: Partial<PeriodStats>;
+}
+
+export interface AutopilotStatus {
+  config: AutopilotConfig;
+  live: { armed: boolean; account_id: string | null; capital_cap: string; armed_by: string | null; armed_at: string | null };
+  progress: { running: boolean; done?: number; total?: number; message?: string; run_id?: string };
+  last_run_at: string | null;
+  next_run_at: string | null;
+  paper_account: string;
+  managed: ManagedDeployment[];
+  latest_run: AutopilotRun | null;
+}
+
+export interface AutopilotDecision {
+  decision_id: string;
+  at: string;
+  kind: string;
+  title: string;
+  reasons: string[];
+  instrument_id: string | null;
+  deployment_id: string | null;
+  run_id: string | null;
+  actor: string;
 }

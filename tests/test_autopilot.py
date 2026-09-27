@@ -15,6 +15,7 @@ from jdquant.core.clock import SimulatedClock
 from jdquant.core.errors import PlatformError
 from jdquant.core.types import Side
 from jdquant.marketdata.instruments import AssetClass, Instrument
+from jdquant.marketdata.records import Candle
 from jdquant.marketdata.synthetic import random_walk_candles
 from jdquant.markets.india import IST
 from jdquant.oms.orders import OrderRequest, OrderStatus, OrderType
@@ -25,6 +26,7 @@ from jdquant.strategy.runner import DeploymentRunner
 from jdquant.trading.engine import AccountMode, DeploymentState, TradingAccount
 
 TREND, NOISE = "NSE:TREND-EQ", "NSE:NOISE-EQ"
+GRID = 27  # daily-bar candidates per stock
 START = datetime(2023, 1, 2, 10, 0, tzinfo=UTC)
 
 
@@ -71,7 +73,7 @@ def test_research_selects_a_real_trend_and_rejects_noise():
         {TREND: trending(), NOISE: noise()},
         ResearchConfig(capital=Decimal(500_000)),
     )
-    assert result.trials == 36
+    assert result.trials == 2 * GRID
     assert [s.evaluation.instrument_id for s in result.selections] == [TREND]
     assert not any(e.passed for e in result.evaluations if e.instrument_id == NOISE)
     chosen = result.selections[0]
@@ -83,7 +85,7 @@ def test_pure_noise_produces_no_selections():
     instruments = [nse(f"N{i}-EQ") for i in range(6)]
     candles = {i.instrument_id: noise(i.symbol, seed=200 + n) for n, i in enumerate(instruments)}
     result = research(instruments, candles, ResearchConfig())
-    assert result.trials == 6 * 18 and result.selections == []
+    assert result.trials == 6 * GRID and result.selections == []
     assert all(not e.passed and e.reasons for e in result.evaluations)
     luck = sum(any("luck" in r for r in e.reasons) for e in result.evaluations)
     assert luck >= 0.95 * len(result.evaluations)  # the luck test alone rejects nearly all of them
@@ -168,7 +170,7 @@ class Harness:
 def test_cycle_deploys_winners_to_the_ai_paper_account():
     h = Harness()
     run = h.autopilot.run_cycle()
-    assert run.error is None and run.data_source == "broker history" and run.trials == 36
+    assert run.error is None and run.data_source == "broker history" and run.trials == 2 * GRID
     [m] = h.managed()
     assert m.instrument_id == TREND and m.capital == Decimal(200_000)
     deployment = h.platform.trading.get_deployment(m.deployment_id)
@@ -184,7 +186,7 @@ def test_cycle_deploys_winners_to_the_ai_paper_account():
 
 def _with_grid(grid, fn):
     original = research_module.candidate_grid
-    research_module.candidate_grid = lambda: grid
+    research_module.candidate_grid = lambda interval_seconds=86400: grid
     try:
         return fn()
     finally:
@@ -423,7 +425,96 @@ def test_api_permissions_and_flow(platform):
         "autopilot"
     ].run_cycle()  # synchronous for the test (the API starts it in the background)
     latest = client.get("/api/v1/autopilot").json()["latest_run"]
-    assert latest["data_source"] == "synthetic demo data" and latest["trials"] == 18
+    assert latest["data_source"] == "synthetic demo data" and latest["trials"] == GRID
     assert client.get("/api/v1/autopilot/decisions").json()[0]["kind"] in ("CYCLE", "DEPLOY", "SKIP")
     assert client.get(f"/api/v1/autopilot/runs/{latest['run_id']}").status_code == 200
     assert client.post("/api/v1/autopilot:run").status_code == 202
+
+
+# ---- the wider strategy set --------------------------------------------------------------------
+
+
+def test_candidate_grid_depends_on_bar_size():
+    from jdquant.autopilot.research import candidate_grid
+
+    daily, fifteen = candidate_grid(86400), candidate_grid(900)
+    assert len(daily) == GRID and not any(c.signal == "orb" for c in daily)
+    orb = [c for c in fifteen if c.signal == "orb"]
+    assert [dict(c.params)["period"] for c in orb] == [2, 4]  # first 30 and 60 minutes
+    assert len({c.key for c in daily}) == len(daily)  # keys are unique
+    assert all(c.label != c.key for c in fifteen)  # every candidate has a readable label
+
+
+@pytest.mark.parametrize("signal", ["momentum", "macd", "supertrend", "rsi_trend", "volume_breakout"])
+def test_new_signals_trade_without_errors(signal):
+    from jdquant.autopilot.research import candidate_grid, strategy_parameters
+
+    candidate = next(c for c in candidate_grid() if c.signal == signal)
+    params = strategy_parameters(candidate, Decimal(100_000), ResearchConfig())
+    result = _backtest(trending(), **params)
+    assert result.strategy_errors == 0
+    assert result.fills, f"{signal} never traded on a trending series"
+
+
+def test_trend_signals_are_long_in_an_uptrend_and_flat_in_a_downtrend():
+    from jdquant.strategy.indicators import macd, rate_of_change, supertrend
+
+    up = [100 + i for i in range(80)]
+    down = list(reversed(up))
+    assert supertrend([x + 1 for x in up], [x - 1 for x in up], up, 10, 3)[0] is True
+    assert supertrend([x + 1 for x in down], [x - 1 for x in down], down, 10, 3)[0] is False
+    line, signal_line = macd(up[:40] + down[:20])  # a peak followed by a fall
+    assert line < signal_line
+    assert rate_of_change(up, 20) > 0 > rate_of_change(down, 20)
+
+
+def test_trailing_stop_locks_in_gains():
+    # Breakout entry at 1010, a run-up to about 1300, then a steady fall.
+    rise = [1010 * 1.02**k for k in range(14)]
+    closes = [1000] * 25 + rise + [rise[-1] * 0.98**k for k in range(1, 25)]
+    bars = []
+    for i, close in enumerate(closes):
+        close = Decimal(str(round(close, 2)))
+        open_ts = START + timedelta(days=i)
+        high, low = (Decimal(1005), Decimal(900)) if i < 25 else (close + 1, close - 1)
+        bars.append(Candle(TREND, 86400, open_ts, open_ts + timedelta(days=1), close, max(high, close),
+                           min(low, close), close, Decimal(1000)))  # fmt: skip
+    base = {"signal": "donchian", "period": 20, "capital": "50000", "stop_loss": "0.08"}
+    trailing = _backtest(bars, **base, trailing_stop="0.05")
+    fixed = _backtest(bars, **base)
+    trailing_exit = next(f for f in trailing.fills if f.side is Side.SELL)
+    fixed_exit = next(f for f in fixed.fills if f.side is Side.SELL)
+    assert trailing_exit.price > Decimal(1200)  # sold within about 5% of the ~1300 high
+    assert trailing_exit.exchange_ts < fixed_exit.exchange_ts
+    assert trailing.final_equity > fixed.final_equity
+
+
+def test_opening_range_breakout_trades_the_break_and_exits_by_the_cutoff():
+    day = datetime(2026, 1, 5, 3, 45, tzinfo=UTC)  # 09:15 IST, 15-minute bars
+    prices = [1000, 1004, 1002, 1003, 1010, 1015, 1020] + [1020] * 18
+    bars = []
+    for i, price in enumerate(prices):
+        price = Decimal(price)
+        open_ts = day + timedelta(minutes=15 * i)
+        bars.append(Candle(TREND, 900, open_ts, open_ts + timedelta(minutes=15), price, price + 1, price - 1,
+                           price, Decimal(100)))  # fmt: skip
+    result = _backtest(bars, signal="orb", period=2, capital="50000", stop_loss="0", intraday=True)
+    entry = next(f for f in result.fills if f.side is Side.BUY)
+    assert entry.exchange_ts.astimezone(IST).time() >= time(10, 15)  # after the range (09:15-09:45) broke
+    exit_ = result.fills[-1]
+    assert exit_.side is Side.SELL and exit_.exchange_ts.astimezone(IST).time() >= time(15, 10)
+
+
+def test_resting_orders_on_the_ai_paper_account_fill_from_live_quotes():
+    from jdquant.connectivity.poller import VenuePoller
+    from jdquant.marketdata.records import Quote
+
+    h = Harness()
+    poller = VenuePoller(h.platform, type("NoVenues", (), {"connections": {}, "adapters": {}})(), h.runner)
+    set_quote(h.platform, TREND, "999", "1001")
+    order = h.platform.oms.submit(
+        OrderRequest(PAPER_AI_ACCOUNT, TREND, Side.BUY, OrderType.LIMIT, Decimal(5), limit_price=Decimal(990))
+    )
+    assert order.status is OrderStatus.OPEN
+    poller.on_quote(Quote(TREND, h.clock.now(), Decimal("985"), Decimal(1), Decimal("987"), Decimal(1)))
+    assert order.status is OrderStatus.FILLED

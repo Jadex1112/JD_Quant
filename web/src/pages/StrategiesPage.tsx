@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { get, post, type Deployment, type Instrument, type StrategyTemplate } from "../api";
+import { accountTrades, get, post, type Deployment, type Instrument, type StrategyTemplate } from "../api";
 import { useApp } from "../app-state";
 import { Confirm, Dialog, Empty, ModeBadge, Section, StatusBadge, useData } from "../components/ui";
 
@@ -174,7 +174,7 @@ function CreateDeployment({ templates, onClose }: { templates: StrategyTemplate[
     setParams(Object.fromEntries(Object.entries(template.parameters).map(([k, p]) => [k, String(p.default ?? "")])));
   }, [template]);
   const account = accounts.find((a) => a.account_id === accountId);
-  const available = (instruments.data ?? []).filter((i) => !account || account.mode === "PAPER" || i.venue === account.venue);
+  const available = (instruments.data ?? []).filter((i) => accountTrades(account, i));
   useEffect(() => {
     if (available.length && !available.some((i) => i.instrument_id === instrumentId)) setInstrumentId(available[0].instrument_id);
   }, [available, instrumentId]);

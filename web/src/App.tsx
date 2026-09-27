@@ -6,6 +6,7 @@ import { Layout } from "./components/Layout";
 import { AccountPage } from "./pages/AccountPage";
 import { AdminPage } from "./pages/AdminPage";
 import { AiPage } from "./pages/AiPage";
+import { AutopilotPage } from "./pages/AutopilotPage";
 import { ConnectionsPage } from "./pages/ConnectionsPage";
 import { Dashboard } from "./pages/Dashboard";
 import { MarketsPage } from "./pages/MarketsPage";
@@ -46,6 +47,7 @@ export function App() {
       <Layout>
         <Routes>
           <Route path="/" element={<Dashboard />} />
+          <Route path="/autopilot" element={<AutopilotPage />} />
           <Route path="/trading" element={<TradingPage />} />
           <Route path="/markets" element={<MarketsPage />} />
           <Route path="/strategies" element={<StrategiesPage />} />

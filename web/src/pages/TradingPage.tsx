@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ApiError, api, get, post, type Fill, type Instrument, type Order, type Position } from "../api";
+import { ApiError, accountTrades, api, get, post, type Fill, type Instrument, type Order, type Position } from "../api";
 import { describe, useApp } from "../app-state";
 import { FillsTable, OrdersTable, PositionsTable } from "../components/tables";
 import { Confirm, ModeBadge, Section, useData } from "../components/ui";
@@ -65,7 +65,7 @@ function OrderTicket({ onSubmitted }: { onSubmitted: () => void }) {
   }, [accounts, accountId]);
   const account = accounts.find((a) => a.account_id === accountId);
   const available = useMemo(
-    () => (instruments.data ?? []).filter((i) => !account || account.mode === "PAPER" || i.venue === account.venue),
+    () => (instruments.data ?? []).filter((i) => accountTrades(account, i)),
     [instruments.data, account],
   );
   useEffect(() => {

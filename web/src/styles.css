@@ -188,3 +188,14 @@ input[aria-invalid="true"] { border-color: var(--danger); }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
+
+/* ---- autopilot ---- */
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 12px 0 0; }
+.kv dt { color: var(--text-muted); }
+.kv dd { margin: 0; overflow-wrap: anywhere; }
+.timeline { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.timeline > li { border-left: 2px solid var(--border); padding-left: 12px; }
+.timeline ul { margin: 4px 0 0; padding-left: 18px; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+progress { accent-color: var(--accent); height: 8px; }
+tr[aria-selected="true"] td { background: var(--surface-2); }

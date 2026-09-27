@@ -8,8 +8,9 @@ import threading
 from jdquant.connectivity.base import VenueError, VenueTimeout
 from jdquant.connectivity.connections import ConnectionManager
 from jdquant.marketdata.records import Quote, Trade
-from jdquant.platform import PAPER_ACCOUNT_ID, Platform
+from jdquant.platform import Platform
 from jdquant.strategy.runner import DeploymentRunner
+from jdquant.trading.engine import AccountMode
 
 log = logging.getLogger(__name__)
 
@@ -106,9 +107,10 @@ class VenuePoller:
         p = self._platform
         with p.lock:
             p.market.on_quote(quote)
+            paper = {a.account_id for a in p.trading.accounts.values() if a.mode is AccountMode.PAPER}
             has_paper_orders = any(
-                o.instrument_id == quote.instrument_id
-                for o in p.oms.list_orders(account_id=PAPER_ACCOUNT_ID, working_only=True)
+                o.instrument_id == quote.instrument_id and o.account_id in paper
+                for o in p.oms.list_orders(working_only=True)
             )
             if has_paper_orders:
                 p.venue.on_trade(Trade(quote.instrument_id, quote.exchange_ts, quote.mid, 0))

@@ -10,6 +10,7 @@ const NAV: { group: string; items: { to: string; label: string; permission: stri
     group: "Trade",
     items: [
       { to: "/", label: "Dashboard", permission: "position:view" },
+      { to: "/autopilot", label: "AI Autopilot", permission: "autopilot:view" },
       { to: "/trading", label: "Trading", permission: "order:view" },
       { to: "/markets", label: "Markets", permission: "marketdata:view" },
       { to: "/strategies", label: "Strategies", permission: "deployment:view" },

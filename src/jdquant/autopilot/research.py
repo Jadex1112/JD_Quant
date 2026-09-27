@@ -63,10 +63,22 @@ class Candidate:
                 return f"Breakout: {p['period']}-bar channel"
             case "ml":
                 return f"ML: logistic model, {self.horizon}-bar horizon, ±{p['threshold']} band"
+            case "momentum":
+                return f"Momentum: positive {p['period']}-bar return"
+            case "macd":
+                return f"Trend: MACD({p['fast']},{p['slow']},{p['signal_len']}) crossover"
+            case "supertrend":
+                return f"Trend: Supertrend({p['period']}, {p['k']}×ATR)"
+            case "rsi_trend":
+                return f"Pullback: RSI({p['period']}) < {p['lower']} above the {p['trend']}-bar average"
+            case "volume_breakout":
+                return f"Breakout: {p['period']}-bar high on volume > {p['k']}σ"
+            case "orb":
+                return f"Intraday: opening-range breakout ({p['period']} bars)"
         return self.key
 
 
-def candidate_grid() -> list[Candidate]:
+def candidate_grid(interval_seconds: int = 86400) -> list[Candidate]:
     grid = [
         Candidate("ma_cross", (("fast", f), ("slow", s))) for f, s in ((5, 20), (10, 30), (10, 50), (20, 60))
     ]
@@ -82,6 +94,20 @@ def candidate_grid() -> list[Candidate]:
     grid += [
         Candidate("ml", (("threshold", Decimal(t)),), horizon=h) for h in (1, 5) for t in ("0.02", "0.05")
     ]
+    grid += [Candidate("momentum", (("period", p), ("threshold", Decimal(0)))) for p in (60, 120)]
+    grid += [
+        Candidate("macd", (("fast", f), ("slow", sl), ("signal_len", sg)))
+        for f, sl, sg in ((12, 26, 9), (5, 35, 5))
+    ]
+    grid += [Candidate("supertrend", (("period", p), ("k", Decimal(k)))) for p, k in ((10, "3"), (10, "2"))]
+    grid += [
+        Candidate("rsi_trend", (("period", 2), ("lower", Decimal(lo)), ("upper", Decimal(70)), ("trend", t)))
+        for lo, t in ((10, 200), (5, 100))
+    ]
+    grid += [Candidate("volume_breakout", (("period", 20), ("k", Decimal("1.5"))))]
+    if interval_seconds < 86400:  # opening-range breakouts only exist within a session
+        bars_30m = max(1, 1800 // interval_seconds)
+        grid += [Candidate("orb", (("period", n),)) for n in (bars_30m, bars_30m * 2)]
     return grid
 
 
@@ -91,12 +117,13 @@ class ResearchConfig:
     capital: Decimal = Decimal(100_000)  # total budget to allocate across selections
     stop_loss: Decimal = Decimal("0.08")
     take_profit: Decimal = Decimal(0)
+    trailing_stop: Decimal = Decimal(0)
     intraday: bool = False
     product: Product = Product.CNC
     slippage_bps: Decimal = Decimal(5)
     folds: int = 4
     train_fraction: float = 0.4
-    warmup: int = 100
+    warmup: int = 210  # the longest lookback (200-bar trend filter) plus a margin
     min_trades: int = 5
     min_sharpe: float = 0.5
     max_drawdown: float = 0.25
@@ -189,7 +216,7 @@ def research(
     candidates: list[Candidate] | None = None,
     progress: Progress | None = None,
 ) -> ResearchResult:
-    grid = candidates or candidate_grid()
+    grid = candidates or candidate_grid(config.interval_seconds)
     usable, skipped = [], {}
     minimum = config.warmup + config.folds * 30
     for instrument in instruments:
@@ -307,6 +334,7 @@ def strategy_parameters(candidate: Candidate, capital: Decimal, config: Research
         capital=str(capital),
         stop_loss=str(config.stop_loss),
         take_profit=str(config.take_profit),
+        trailing_stop=str(config.trailing_stop),
         intraday=config.intraday,
     )
     return {k: str(v) if isinstance(v, Decimal) else v for k, v in params.items()}

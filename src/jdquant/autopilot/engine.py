@@ -30,6 +30,7 @@ from jdquant.autopilot.research import (
     research,
     strategy_parameters,
 )
+from jdquant.autopilot.strategy import AutopilotStrategy
 from jdquant.core.errors import PlatformError, ValidationError
 from jdquant.marketdata.instruments import Instrument
 from jdquant.marketdata.records import Candle
@@ -64,6 +65,7 @@ class AutopilotConfig:
     product: Product = Product.CNC
     stop_loss: Decimal = Decimal("0.08")
     take_profit: Decimal = Decimal(0)
+    trailing_stop: Decimal = Decimal(0)  # exit this far below the high since entry; 0 disables
     slippage_bps: Decimal = Decimal(5)
     min_sharpe: float = 0.5
     max_drawdown: float = 0.25
@@ -81,6 +83,7 @@ class AutopilotConfig:
             capital=self.capital,
             stop_loss=self.stop_loss,
             take_profit=self.take_profit,
+            trailing_stop=self.trailing_stop,
             intraday=self.product is Product.INTRADAY,
             product=self.product,
             slippage_bps=self.slippage_bps,
@@ -221,8 +224,8 @@ class Autopilot:
             problems.append({"field": "max_weight", "message": "between 0 and 1"})
         if config.data_source not in ("auto", "venue", "synthetic"):
             problems.append({"field": "data_source", "message": "auto, venue or synthetic"})
-        if config.history_bars < 300:
-            problems.append({"field": "history_bars", "message": "at least 300 bars"})
+        if config.history_bars < 400:
+            problems.append({"field": "history_bars", "message": "at least 400 bars"})
         if problems:
             raise ValidationError("AUTOPILOT_CONFIG_INVALID", problems)
         self.config = config
@@ -514,7 +517,7 @@ class Autopilot:
         trading = self._p.trading
         deployment = trading.create_deployment(
             strategy_name="autopilot",
-            strategy_version="1.0.0",
+            strategy_version=AutopilotStrategy.version,
             account_id=PAPER_AI_ACCOUNT,
             parameters=params,
             instruments=[e.instrument_id],
@@ -643,7 +646,7 @@ class Autopilot:
         trading = self._p.trading
         deployment = trading.create_deployment(
             strategy_name="autopilot",
-            strategy_version="1.0.0",
+            strategy_version=AutopilotStrategy.version,
             account_id=self.live.account_id,
             parameters=params,
             instruments=[m.instrument_id],
