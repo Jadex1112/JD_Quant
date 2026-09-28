@@ -255,6 +255,7 @@ interface BrokerSpec {
   product?: boolean; // delivery or intraday
   environments?: [string, string][]; // [value, label], first is the default
   totp?: boolean; // Angel One: client code, PIN and TOTP secret
+  neo?: boolean; // Kotak Neo: mobile number, client code (UCC), MPIN and TOTP secret
   optionalKeys?: boolean;
   help: string;
   warn?: string;
@@ -285,6 +286,11 @@ export const BROKERS: Record<string, BrokerSpec> = {
     label: "Dhan", markets: "NSE stocks & ETFs", region: "India", currency: "INR",
     keyLabel: "Client ID", secretLabel: "Access token", product: true,
     help: "On web.dhan.co open Profile → DhanHQ Trading APIs and generate an access token. It is valid for 24 hours; paste a new one with Rotate credentials when it expires.",
+  },
+  KOTAKNEO: {
+    label: "Kotak Neo", markets: "NSE & BSE stocks, F&O, full market depth", region: "India", currency: "INR",
+    keyLabel: "Consumer key", keyHint: "Trade API card in the Neo app", neo: true, product: true,
+    help: "In the Neo app or web open Trade API, create an application and register for TOTP. With your mobile number, client code (UCC), MPIN and TOTP secret (all stored encrypted), the platform signs in by itself each day. Live prices stream over Neo's WebSocket with full depth.",
   },
   OANDA: {
     label: "OANDA", markets: "Spot gold XAU/USD, silver, forex", region: "Global", currency: "USD",
@@ -328,6 +334,7 @@ function CreateConnection({ onClose }: { onClose: (created?: Connection) => void
   const [clientCode, setClientCode] = useState("");
   const [pin, setPin] = useState("");
   const [totp, setTotp] = useState("");
+  const [mobile, setMobile] = useState("");
   const [product, setProduct] = useState("CNC");
   const [busy, setBusy] = useState(false);
   const [filter, setFilter] = useState<"All" | "India" | "Global">("All");
@@ -344,7 +351,11 @@ function CreateConnection({ onClose }: { onClose: (created?: Connection) => void
     e.preventDefault();
     if (!venue || !spec) return;
     setBusy(true);
-    const secret = spec.totp ? JSON.stringify({ client_code: clientCode, pin, totp_secret: totp.replaceAll(" ", "") }) : apiSecret;
+    const secret = spec.totp
+      ? JSON.stringify({ client_code: clientCode, pin, totp_secret: totp.replaceAll(" ", "") })
+      : spec.neo
+        ? JSON.stringify({ mobile: mobile.trim(), ucc: clientCode.trim(), mpin: pin, totp_secret: totp.replaceAll(" ", "") })
+        : apiSecret;
     const created = await run(
       () =>
         post<Connection>("/connections", {
@@ -379,7 +390,7 @@ function CreateConnection({ onClose }: { onClose: (created?: Connection) => void
               <button key={v} className="card" style={{ textAlign: "left", cursor: "pointer" }} onClick={() => pick(v)}>
                 <strong>{b.label}</strong>
                 <div className="small muted">{b.markets}</div>
-                <div className="small muted">{b.login ? "sign in with the broker" : b.totp ? "signs in by itself" : "API keys"}</div>
+                <div className="small muted">{b.login ? "sign in with the broker" : b.totp || b.neo ? "signs in by itself" : "API keys"}</div>
               </button>
             ))}
           </div>
@@ -430,7 +441,26 @@ function CreateConnection({ onClose }: { onClose: (created?: Connection) => void
               type={venue === "OANDA" ? "password" : "text"}
             />
           </label>
-          {spec.totp ? (
+          {spec.neo ? (
+            <>
+              <label className="field">
+                Mobile number <span className="small muted">(with country code, e.g. +919876543210)</span>
+                <input required type="tel" value={mobile} onChange={(e) => setMobile(e.target.value)} autoComplete="off" />
+              </label>
+              <label className="field">
+                Client code (UCC)
+                <input required value={clientCode} onChange={(e) => setClientCode(e.target.value)} spellCheck={false} />
+              </label>
+              <label className="field">
+                MPIN
+                <input required type="password" inputMode="numeric" value={pin} onChange={(e) => setPin(e.target.value)} autoComplete="new-password" />
+              </label>
+              <label className="field">
+                TOTP secret <span className="small muted">(the key shown when you registered for TOTP)</span>
+                <input required type="password" value={totp} onChange={(e) => setTotp(e.target.value)} autoComplete="new-password" spellCheck={false} />
+              </label>
+            </>
+          ) : spec.totp ? (
             <>
               <label className="field">
                 Client code

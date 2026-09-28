@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from "react";
-import { NavLink } from "react-router-dom";
+import { NavLink, useNavigate } from "react-router-dom";
 import { get, post, type Deployment, type Instrument, type LabRun, type RuleSpec, type Translation } from "../api";
 import { useApp } from "../app-state";
 import { Badge, Dialog, Empty, Section, useData } from "../components/ui";
@@ -248,6 +248,8 @@ export function LabPage() {
 }
 
 function LabResult({ result, onPaper }: { result: LabRun; onPaper: () => void }) {
+  const { can, run } = useApp();
+  const navigate = useNavigate();
   const [paper, setPaper] = useState(false);
   const r = result.results;
   const c = result.confidence;
@@ -283,9 +285,25 @@ function LabResult({ result, onPaper }: { result: LabRun; onPaper: () => void })
       <Section
         title="Results"
         actions={
-          <button className="primary" onClick={() => setPaper(true)} disabled={!!result.deployment_id}>
-            {result.deployment_id ? "Paper trading" : "Paper trade this…"}
-          </button>
+          <>
+            {can("deployment:create") && (
+              <button
+                onClick={async () => {
+                  const created = await run(
+                    () => post<{ strategy_id: string }>("/strategies/from-lab", { run_id: result.run_id }),
+                    "Added to the strategy pipeline",
+                  );
+                  if (created) navigate(`/pipeline?strategy=${created.strategy_id}`);
+                }}
+                title="Version it and take it through backtest, walk-forward validation, paper trading and approval before live"
+              >
+                Add to pipeline
+              </button>
+            )}
+            <button className="primary" onClick={() => setPaper(true)} disabled={!!result.deployment_id}>
+              {result.deployment_id ? "Paper trading" : "Paper trade this…"}
+            </button>
+          </>
         }
       >
         <div className="grid two" style={{ alignItems: "start" }}>

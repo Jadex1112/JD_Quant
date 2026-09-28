@@ -10,9 +10,11 @@ const NAV: { group: string; items: { to: string; label: string; permission: stri
     group: "Trade",
     items: [
       { to: "/", label: "Dashboard", permission: "position:view" },
+      { to: "/automation", label: "Bot control", permission: "deployment:view" },
       { to: "/autopilot", label: "AI Autopilot", permission: "autopilot:view" },
       { to: "/trading", label: "Trading", permission: "order:view" },
       { to: "/markets", label: "Markets", permission: "marketdata:view" },
+      { to: "/intelligence", label: "Market intelligence", permission: "marketdata:view" },
       { to: "/strategies", label: "Strategies", permission: "deployment:view" },
     ],
   },
@@ -20,6 +22,7 @@ const NAV: { group: string; items: { to: string; label: string; permission: stri
     group: "Research",
     items: [
       { to: "/lab", label: "Strategy lab", permission: "backtest:run" },
+      { to: "/pipeline", label: "Strategy pipeline", permission: "deployment:view" },
       { to: "/research", label: "Backtests", permission: "backtest:run" },
       { to: "/ai", label: "AI models", permission: "model:view" },
     ],

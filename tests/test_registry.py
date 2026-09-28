@@ -191,3 +191,26 @@ def test_director_tools_explain_the_bot(app_ctx):
     assert tools["strategy_pipeline"].handler(None, {})["strategies"] == []
     assert "summary" in tools["explain_signal"].handler(None, {})
     assert "active" in tools["wall_history"].handler(None, {"instrument_id": BTC})
+
+
+def test_lab_rules_join_the_pipeline(app_ctx):
+    from types import SimpleNamespace
+
+    from test_lab import EMA_CROSS
+
+    _, c, platform, _ = app_ctx
+    registry = _registry(c, platform, history=False)
+    run = SimpleNamespace(
+        spec=EMA_CROSS,
+        capital_quote="",
+        leverage="2",
+        instrument_id=BTC,
+        interval_seconds=3600,
+        text="EMA trend",
+    )
+    lab = SimpleNamespace(get=lambda run_id: run)
+    d = registry.from_lab(lab, "LAB-1", name="", user="alice")
+    assert d.template == "rules" and d.name == "Lab LAB-1"
+    params = d.versions[0].parameters
+    assert params["capital"] == "100000" and params["leverage"] == "2"
+    assert registry.backtest(d.strategy_id, "1.0", "alice")["bars"] == 2000

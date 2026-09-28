@@ -5,7 +5,7 @@ Institutional-grade, AI-driven quantitative trading platform.
 This repository contains:
 
 1. **[Volume 2 – Master Software Requirements Specification](docs/srs/README.md)**: 100 chapters and 1,109 uniquely identified requirements covering functional and non-functional requirements, interfaces, system behaviour, and acceptance criteria.
-2. **The platform (`src/jdquant`)**: a single-node (T1, CON-009) modular monolith with a persistent trading core, an AI autopilot that researches, backtests and trades on its own, login and permissions, broker connections like TradingView's (OANDA for spot gold XAU/USD and forex; Fyers, Zerodha Kite, Upstox, Angel One and Dhan for NSE stocks and ETFs, with MCX and currency futures on Fyers; Delta Exchange India for crypto perpetuals; Binance and Alpaca), leverage where the market allows it, a strategy lab where you type a strategy in plain words and the AI backtests it with a confidence score, an AI that takes trades each minute from the signals of walk-forward-tested strategies and learns from its losing trades, live price charts, and a REST API.
+2. **The platform (`src/jdquant`)**: a single-node (T1, CON-009) modular monolith with a persistent trading core, an AI autopilot that researches, backtests and trades on its own, login and permissions, broker connections like TradingView's (OANDA for spot gold XAU/USD and forex; Fyers, Zerodha Kite, Upstox, Angel One, Dhan and Kotak Neo for NSE stocks and ETFs, with MCX and currency futures on Fyers; Delta Exchange India for crypto perpetuals; Binance and Alpaca), leverage where the market allows it, a strategy lab where you type a strategy in plain words and the AI backtests it with a confidence score, an AI that can take trades each minute from the signals of walk-forward-tested strategies and learns from its losing trades, market intelligence (order books from several brokers, liquidity walls, order flow, VWAP, volume profile, structure, regime, options and futures positioning, a searchable event store and event graph, a scanner, news and replay), automated-trading controls (structured signals, pre-trade guards, circuit breakers, STOP ALL, broker reconciliation, a trade journal and execution quality), a strategy pipeline from development to live with versions and rollback, live price charts, and a REST API.
 3. **The web UI (`web/`)**: a React single-page app served by the same process.
 
 ## Quick start
@@ -33,7 +33,7 @@ Development: `npm run dev` in `web/` serves the UI with hot reload on port 5173 
 Tests and checks:
 
 ```bash
-.venv/bin/pytest                     # 297 tests, traced to SRS acceptance criteria
+.venv/bin/pytest                     # 375 tests, traced to SRS acceptance criteria
 .venv/bin/ruff check . && .venv/bin/ruff format --check .
 (cd web && npm run typecheck)
 ```
@@ -111,7 +111,7 @@ Your broker may allow less. Leverage scales position size, and research, backtes
 
 ### The AI takes the trades, based on the tested strategies
 
-With an AI model configured (see below), the AI decides the trades. **Who takes the trades** in the settings can also hand them back to the strategies.
+By default the tested strategies take the trades by their own rules. With an AI model configured (see below), choose **the AI** under **Who takes the trades** to let it decide among the strategies' signals, as follows.
 
 1. Research picks the instruments with evidence. For each, up to five of the strategies that passed every test form its panel.
 2. The instrument gets an *AI trader* deployment on the `paper-ai` account. On every bar it works out what each panel strategy would hold now: long, short or flat.
@@ -130,7 +130,7 @@ With an AI model configured (see below), the AI decides the trades. **Who takes 
    - Stops and the trailing stop are checked on every bar.
 5. Proven AI traders are promoted to armed live accounts under the same rules as strategies. Each live copy follows the same decisions, sized to its own capital.
 
-Without an AI model, or with **the best tested strategy** chosen, each instrument's best strategy trades on its own. The AI then reviews once a minute: in *advise* mode it only comments; in *act* mode it may close, halve or hold back trades it is at least 70% confident about. Either way it can never open or add to a position.
+Without an AI model, or with **the best tested strategy** chosen (the default), each instrument's best strategy trades on its own. The AI then reviews once a minute: in *advise* mode it only comments; in *act* mode it may close, halve or hold back trades it is at least 70% confident about. Either way it can never open or add to a position.
 
 An AI's decisions cannot be backtested, so each one is scored against the price 15 and 60 minutes later, and the AI trader's own P&L is shown next to the strategies' backtested results. Keep it on paper until that record is convincing. A daily call budget (1,500 by default) caps the cost.
 
@@ -208,7 +208,8 @@ Orders are fill-or-kill market orders or limit orders, tagged with the platform'
 | **Zerodha Kite** | NSE stocks and ETFs | Sign in with Kite once a day (Kite sessions end at 06:00 IST) |
 | **Upstox** | NSE stocks and ETFs | Sign in with Upstox once a day (sessions end at 03:30 IST) |
 | **Angel One** | NSE stocks and ETFs | Signs in by itself each day with the client code, PIN and TOTP secret |
-| **Dhan** | NSE stocks and ETFs | Client ID and a 24-hour access token from web.dhan.co; paste a new one with **Rotate keys** |
+| **Dhan** | NSE stocks and ETFs, option chains, 20- and 200-level depth | Client ID and a 24-hour access token from web.dhan.co; paste a new one with **Rotate keys** |
+| **Kotak Neo** | NSE and BSE stocks, full market depth | Signs in by itself each day with the consumer key, mobile number, client code (UCC), MPIN and TOTP secret |
 | **OANDA** | Spot gold and silver, forex | API token and account ID; practice account by default |
 | **Delta Exchange India** | Crypto perpetual futures, long or short | API key and secret; testnet by default |
 | **Binance** | Crypto spot | API key and secret; testnet by default |
@@ -217,6 +218,57 @@ Orders are fill-or-kill market orders or limit orders, tagged with the platform'
 For the sign-in brokers (Fyers, Kite, Upstox), set the app's redirect URL to `http://127.0.0.1:8000/api/v1/connections/oauth/callback` (or your `JDQ_PUBLIC_URL`); the sign-in dialog shows the exact URL. Every credential and session token is stored encrypted.
 
 The same NSE stock through several brokers is one instrument (`NSE:RELIANCE-EQ`), so charts, research and positions line up; each broker keeps its own reference for it. Choose Delivery (CNC) or Intraday per connection. Orders carry the platform's order ID as a tag, so the order book can be matched up after a restart. Zerodha, Upstox, Angel One and Dhan have no test environment: real orders happen only when you trade on the account yourself or arm the autopilot. MCX and currency futures are traded through Fyers only.
+
+## Market intelligence
+
+**Market intelligence** follows the instruments on its watchlist (up to 50) and shows what the order book and the tape are doing. It works the same for Indian stocks, MCX, crypto and XAU/USD; with `JDQ_DEMO_FEED=1`, instruments without a broker get a simulated order book, badged SIMULATED everywhere.
+
+- **Market data from several brokers.** Dhan, Fyers and Kotak Neo stream over their WebSockets (Dhan's market feed plus 20- or 200-level depth for up to five instruments, Fyers' data socket, Neo's full depth); other brokers are polled for depth. Every book is normalized (bids, asks, orders per level, last trade, volume, open interest) but each broker's book stays separate: quantities are never added across brokers. The **data quality** view compares brokers and says whether they agree, lag each other (TIMING) or disagree (DISCREPANCY).
+- **Order book intelligence.** A level much larger than typical is tracked as a **liquidity wall**: when it appeared, how long it lasted, peak size and orders, how much traded at that price while it was there, and how it ended: **consumed** (traded away), **withdrawn** (cancelled without trades), **reduced**, or **migrated** (reappearing at a nearby price). For example, if ₹263 shows 585,858 shares on the bid and then vanishes with only a few thousand traded, the event says 99% of the displayed quantity was removed without matching trades. It never says who did it or why: market data carries no participant identity, so every such event states that it **does not establish manipulation**.
+- **Order flow.** Delta and cumulative delta (CVD), buy/sell aggression, top-of-book imbalance, large trades, sweeps, absorption, exhaustion, and liquidity pulled or stacked near the touch. Trades are inferred from volume changes between book updates (the aggressor from where they printed against the quote), and the page says so.
+- **Price analysis.** Session VWAP with ±1/±2 SD bands and reclaims or rejections, the volume profile (POC, value area, high- and low-volume nodes), previous-day and opening-range levels, support and resistance zones, swings with breaks of structure and changes of character on eight timeframes, and a **regime** (trending, range-bound, breakout, high or low volatility, mean reverting) with the evidence and a confidence.
+- **Options and futures.** Option chains from Fyers or Dhan (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY): open interest and its change, IV and Greeks (Black-Scholes when the broker sends none), put-call ratio, max pain, the 25-delta skew and the expected move. Futures show long build-up, short build-up, short covering or long unwinding, and the basis to spot.
+- **Events.** Everything above becomes a timestamped event in a searchable store (by instrument, category, severity and text; also streamed live). Events are linked into an **event graph** by timing rules, for example *liquidity pulled → sweep → wall withdrawn → breakout*: a sequence, not proof of cause. **Explain** describes an event in plain language: with an AI model configured it uses the model, otherwise the platform's own template.
+- **Scanner** across a universe of up to 1,000 instruments: unusual volume for the time of day, big moves, gaps, breakouts and breakdowns, walls, aggressive buying or selling, OI and IV expansion, liquidity withdrawal and news.
+- **News and corporate events.** RSS or Atom feeds and manual headlines are matched to instruments; **Market reaction** shows the price from 5 minutes before to 60 minutes after, the volume change and the events around it. Results, dividends, splits, bonus issues and board meetings (added by hand or imported from CSV) can warn about or block automated entries on those days.
+- **Recording and replay.** After you acknowledge the data-use notice, the order books and trades of watched instruments are recorded locally (kept 30 days by default). **Replay** plays a recorded session through fresh copies of the engines, and an order-book strategy can be tested on it.
+
+Market data is licensed by the exchanges through your brokers. Recordings stay on your machine for your own analysis: do not redistribute them, and check each broker's API terms.
+
+## Automated trading: bot control
+
+The rule is: **strategies decide by explicit rules, the risk engine can veto any order, only the execution engine sends orders, and the AI advises and explains.** **Bot control** shows it working.
+
+- **Signals.** Every automated order is a signal with its reason codes (for example `VWAP_RECLAIM`, `POSITIVE_DELTA`), confidence, stop and target, followed through to BLOCKED (with the risk check or guard that said no), SUBMITTED, FILLED, CANCELLED or REJECTED.
+- **Strategies on order flow.** Three templates use the live features: *order-flow momentum*, *liquidity wall bounce* and *VWAP reclaim*. Every strategy can attach exits: stop, target, trailing stop, break-even, time exit, volatility exit and signal reversal.
+- **Pre-trade guards** on top of the risk limits: duplicate orders, maximum open positions, exposure per sector or asset group, a stop required for automated entries, expected slippage for the order's size (from the visible book), and corporate events.
+- **Circuit breakers** trip kill switches by themselves: a stale feed or failed broker login, repeated broker rejections, slippage far above normal, N losing trades in a row (pauses that strategy), and a position mismatch with the broker (stops the account).
+- **STOP ALL** triggers a global kill switch that blocks new orders, and optionally cancels working orders or closes every position.
+- **Reconciliation** compares expected positions with each live broker every minute; **All positions** lists every account separately, never netting brokers.
+- **Trade journal.** Fills are paired into round trips with the reasons in and out and the market at entry (regime, VWAP, flow, walls). Patterns by strategy, reason, instrument, hour, weekday and regime show what works; **Review this trade** writes a post-trade review.
+- **Execution quality**: slippage against the price expected at submission, fill ratio and time to fill, by broker, strategy and instrument.
+
+## Strategy pipeline
+
+Strategies are registered with an ID (`STR-001`) and versions (`1.0`, `1.1`, …). Every version moves through gates that the code enforces:
+
+```text
+DEVELOPMENT → BACKTEST → VALIDATION → PAPER → APPROVED → LIVE
+```
+
+| Gate | Requirement |
+|---|---|
+| Backtest | Runs on broker history, or on synthetic data labelled *not evidence* |
+| Validation | Walk-forward on at least 400 bars of real broker history: most periods profitable, the last one profitable, enough trades |
+| Paper | Deployed on a paper account with live prices |
+| Approved | A long enough paper record (5 days and 5 trades by default), then a person approves; with several users, not the author |
+| Live | Deployed on a live account by a person; the account's limits, guards and breakers apply |
+
+A new version starts again at DEVELOPMENT while the live one keeps trading. **Roll back** stops the live version and redeploys the previous approved one. Strategy-lab results can be added to the pipeline with one click. Nothing the AI writes can skip a gate, and passing them is evidence, not a guarantee.
+
+## AI director
+
+The copilot has read-only tools over these records, so it can answer questions such as *why did the bot take this trade?*, *why was this signal rejected?*, *which strategy is in drawdown?*, *where were the liquidity walls?* and *how much slippage are we paying?* from the signals, journal, execution records, event store and pipeline. These tools cannot place or change anything.
 
 ## Fyers
 
@@ -237,9 +289,9 @@ NSE equities and ETFs, MCX commodity futures and NSE currency futures (front con
 | **Backtesting** | Event-driven, no look-ahead, next-bar fills, fees, slippage and financing, a reproducibility hash, and one-click paper trading of a run. The strategy lab backtests strategies typed in plain words and reports a luck-adjusted confidence. |
 | **Persistence** | SQLite (WAL, full sync) holding orders, fills, positions, deployments, kill switches, risk state, users, audit and models. On restart the platform starts in RECOVERING mode, restores state, reconciles in-flight orders with venues and only then accepts orders. Failure drops it to SAFE mode. |
 | **Security** | scrypt passwords, server-side sessions (HttpOnly cookie + CSRF token, 30-minute idle and 12-hour absolute limits), bearer tokens, scoped API keys (`X-API-Key`), TOTP MFA with recovery codes, step-up MFA for privileged actions, lockout, 12 built-in roles, and a hash-chained audit log you can verify. |
-| **Venues** | OANDA (spot gold and forex, v20), Fyers (NSE equities and futures, API v3), Zerodha Kite, Upstox, Angel One, Dhan (NSE equities), Delta Exchange India (crypto perpetuals), Binance Spot and Alpaca adapters: OAuth sign-in (Fyers, Kite, Upstox), TOTP sign-in (Angel One), Fyers unattended renewal with unattended renewal, signed requests, clock-offset correction, rate limiting, error mapping, native order modify, and fill polling. Credentials and tokens are encrypted at rest and keys with withdrawal permission are refused. Fills carry the charges of their market (NSE, MCX, currency, crypto); per-market session calendars cover trading hours and intraday cutoffs. |
+| **Venues** | OANDA (spot gold and forex, v20), Fyers (NSE equities and futures, API v3), Zerodha Kite, Upstox, Angel One, Dhan, Kotak Neo (NSE equities; WebSocket depth from Dhan, Fyers and Neo), Delta Exchange India (crypto perpetuals), Binance Spot and Alpaca adapters: OAuth sign-in (Fyers, Kite, Upstox), TOTP sign-in (Angel One), Fyers unattended renewal with unattended renewal, signed requests, clock-offset correction, rate limiting, error mapping, native order modify, and fill polling. Credentials and tokens are encrypted at rest and keys with withdrawal permission are refused. Fills carry the charges of their market (NSE, MCX, currency, crypto); per-market session calendars cover trading hours and intraday cutoffs. |
 | **AI** | A feature store that computes features the same way online and offline; logistic/ridge models trained on a purged time split; evaluation reports with cost-adjusted trading metrics; a model registry (staging → shadow → production gate, rollback, shadow scoring, drift alerts); a portfolio optimizer; and a Claude copilot that can read platform state and propose actions that you confirm before they run. |
-| **Web UI** | Dashboard, trading ticket, markets, strategies, live candlestick charts, AI autopilot, strategy lab, backtests with equity chart, risk and kill switches, AI models, connections, users and audit, and account settings (MFA, sessions, API keys). Dark theme by default (light available), works down to phone width, and prompts for MFA step-up in place. |
+| **Web UI** | Dashboard, bot control, trading ticket, markets, market intelligence, strategies, strategy pipeline, live candlestick charts, AI autopilot, strategy lab, backtests with equity chart, risk and kill switches, AI models, connections, users and audit, and account settings (MFA, sessions, API keys). Dark theme by default (light available), works down to phone width, and prompts for MFA step-up in place. |
 
 ## Configuration
 
@@ -285,20 +337,21 @@ Autopilot settings (universe, budget, bar size, stops, capital protection, charg
 | Package | SRS chapters | Contents |
 |---|---|---|
 | `core` | 15, 82, 89 | Clock abstraction (CON-010), Decimal-only money (CON-022), event bus with critical and isolated subscribers, declarative state machines |
-| `marketdata` | 20 | Instrument registry (incl. futures expiry), candle aggregation, reference prices, staleness detection, live one-minute bars and quote streaming, synthetic data |
+| `marketdata` | 20 | Instrument registry (incl. futures expiry), candle aggregation, reference prices, staleness detection, live one-minute bars and quote streaming, synthetic data, normalized order books and ticks, the market-data hub, the recorder |
+| `intelligence` | — | Order-book walls, order flow, VWAP, volume profile, structure, regime, options and futures analytics, events and the event graph, scanner, data quality, news and corporate events, replay |
 | `oms` | 21 | Order state machine, validation, idempotency, modify/replace, fill de-duplication, UNKNOWN resolution |
-| `risk` | 27 | Risk profiles and limits, projections, reducing-order waivers, kill-switch escalation |
+| `risk` | 27 | Risk profiles and limits, projections, reducing-order waivers, kill-switch escalation, pre-trade guards, circuit breakers and reconciliation |
 | `execution` | 22.8 | Deterministic simulated venue |
 | `positions` | 28 | Cost basis, lots, P&L, position flips |
-| `trading` | 19 | Accounts, deployments, kill switches, platform modes |
-| `strategy` | 24 | Strategy contract, templates, strategy runner |
+| `trading` | 19 | Accounts, deployments, kill switches, platform modes, signal log, trade journal, execution quality |
+| `strategy` | 24 | Strategy contract, templates (incl. order-flow strategies), exit engine, strategy runner, versioned strategy pipeline |
 | `backtest`, `analytics` | 25, 31–32 | Backtester and metric library |
 | `persistence` | 51, 83, 92 | SQLite store with migrations, journal, recovery |
 | `security` | 39–40, 42 | Passwords, TOTP, sessions, API keys, roles, encrypted secrets, audit chain |
-| `connectivity` | 45–46 | Venue adapter contract, OANDA, Fyers, Zerodha Kite, Upstox, Angel One, Dhan, Delta Exchange, Binance and Alpaca adapters, broker OAuth, account router, connection manager, poller |
+| `connectivity` | 45–46 | Venue adapter contract, OANDA, Fyers, Zerodha Kite, Upstox, Angel One, Dhan, Kotak Neo, Delta Exchange, Binance and Alpaca adapters, WebSocket feeds (Dhan, Fyers, Neo), broker OAuth, account router, connection manager, poller |
 | `markets` | — | Charges for NSE cash, MCX, currency futures, crypto, and forex spread and financing; per-market sessions (incl. forex 24/5) and asset groups |
 | `autopilot` | 24–25, 57 | Autopilot strategies (incl. the AI trader), the strategy lab, candidate generation, walk-forward research with deflated Sharpe, the controller, the per-minute AI trader and monitor, and lessons from losing trades |
-| `ai` | 52–59, 63 | Features, training, model registry, optimizer, prompts, copilot and its tools, the autopilot analyst |
+| `ai` | 52–59, 63 | Features, training, model registry, optimizer, prompts, copilot and its tools (incl. the read-only AI director), the autopilot analyst |
 | `api` | 80 | `/api/v1` REST resources with problem-details errors; serves the web UI |
 
 ## Known gaps
@@ -316,4 +369,7 @@ Autopilot settings (universe, budget, bar size, stops, capital protection, charg
 - The NSE holiday list is not bundled; add holidays to the calendar, or cycles simply find no new bars on those days.
 - Fyers endpoints follow the official `fyers-apiv3` SDK, OANDA the official `v20-python` SDK, Zerodha `pykiteconnect`, Upstox `upstox-python-sdk`, Angel One `smartapi-python`, Dhan `dhanhq`, Delta Exchange `delta-rest-client`, and the NVIDIA analyst NVIDIA's OpenAI-compatible API. All were verified against simulated servers, because the brokers' hosts and integrate.api.nvidia.com are unreachable from the build environment. Place a small test order on each new broker before arming it.
 - MCX and currency futures are supported through Fyers only; the other Indian brokers trade NSE stocks and ETFs.
+- The WebSocket feeds and the Kotak Neo adapter follow the brokers' official SDKs (`dhanhq`, `fyers-apiv3`, `kotakneoapi`) and were verified against local servers speaking those wire formats, not against the brokers themselves. Kotak Neo's REST quote format is not published, so its quotes are parsed on a best-effort basis and it supplies no candle history (use another broker for history).
+- Order flow is estimated: trades are inferred from volume changes between book updates, so small trades between snapshots merge, and no feed identifies participants. Wall and flow events describe displayed quotes and trades; they are not evidence of anyone's intent.
+- Walk-forward validation in the strategy pipeline needs real broker history; synthetic data can only be backtested. Replay backtests fill against the recorded book, which your own orders would have changed.
 - Paper trading needs live prices: without a Fyers connection, NSE deployments wait for quotes and research uses synthetic demo data (the page says so).

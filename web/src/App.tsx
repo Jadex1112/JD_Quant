@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { ApiError, get, onUnauthenticated, post, type Me } from "./api";
 import { AppProvider, describe } from "./app-state";
@@ -15,6 +15,10 @@ import { ResearchPage } from "./pages/ResearchPage";
 import { RiskPage } from "./pages/RiskPage";
 import { StrategiesPage } from "./pages/StrategiesPage";
 import { TradingPage } from "./pages/TradingPage";
+
+const IntelligencePage = lazy(() => import("./pages/intelligence/IntelligencePage").then((m) => ({ default: m.IntelligencePage })));
+const AutomationPage = lazy(() => import("./pages/AutomationPage").then((m) => ({ default: m.AutomationPage })));
+const PipelinePage = lazy(() => import("./pages/PipelinePage").then((m) => ({ default: m.PipelinePage })));
 
 type AuthState = { kind: "loading" } | { kind: "setup" } | { kind: "login"; message?: string } | { kind: "in"; me: Me };
 
@@ -46,11 +50,15 @@ export function App() {
   return (
     <AppProvider me={auth.me} onLogout={() => setAuth({ kind: "login" })}>
       <Layout>
+        <Suspense fallback={<div className="muted">Loading…</div>}>
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/autopilot" element={<AutopilotPage />} />
           <Route path="/trading" element={<TradingPage />} />
           <Route path="/markets" element={<MarketsPage />} />
+          <Route path="/intelligence" element={<IntelligencePage />} />
+          <Route path="/automation" element={<AutomationPage />} />
+          <Route path="/pipeline" element={<PipelinePage />} />
           <Route path="/strategies" element={<StrategiesPage />} />
           <Route path="/lab" element={<LabPage />} />
           <Route path="/research" element={<ResearchPage />} />
@@ -61,6 +69,7 @@ export function App() {
           <Route path="/account" element={<AccountPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
+        </Suspense>
       </Layout>
     </AppProvider>
   );
