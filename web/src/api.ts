@@ -602,6 +602,7 @@ export interface Translation {
   assumptions: string[];
   unsupported: string[];
   model: string;
+  code?: string;
 }
 
 export interface LabCheck {

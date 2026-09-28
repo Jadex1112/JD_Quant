@@ -33,7 +33,7 @@ Development: `npm run dev` in `web/` serves the UI with hot reload on port 5173 
 Tests and checks:
 
 ```bash
-.venv/bin/pytest                     # 378 tests, traced to SRS acceptance criteria
+.venv/bin/pytest                     # 380 tests, traced to SRS acceptance criteria
 .venv/bin/ruff check . && .venv/bin/ruff format --check .
 (cd web && npm run typecheck)
 ```
@@ -169,7 +169,7 @@ When the strategies trade on their own, research, paper and live run the same st
 
 Open **Strategy lab**, pick an instrument and bar size, and either build the rules in the **visual builder** (indicators, comparisons, stops and targets picked from lists, no AI involved) or describe a strategy in plain words, for example *"buy gold when the 20-hour average crosses above the 50-hour average and RSI is under 70; exit on the opposite cross or a 1% stop"*.
 
-1. **Translate.** The AI turns the text into rules: JSON built from a fixed set of indicators and conditions, never code, so nothing it writes can run arbitrary instructions. It lists every assumption it made and anything it could not express. Invalid rules go back to the AI once for repair. The rules are shown in plain English so you can check them before anything runs.
+1. **Translate.** Choose the AI model next to the button: the configured default, **Kimi K3** or **Kimi K2.6** (Moonshot AI, served by NVIDIA with the same `NVIDIA_API_KEY`), or any other model id your key can reach (the box suggests them). The AI turns the text into rules: JSON built from a fixed set of indicators and conditions, never code, so nothing it writes can run arbitrary instructions. It lists every assumption it made and anything it could not express. Invalid rules go back to the AI once for repair. The rules are shown in plain English so you can check them before anything runs, and **As Python code** shows them as a readable (and downloadable) Python file, generated from the rules without AI.
 2. **Backtest.** The rules run on broker history when a broker is connected, otherwise on synthetic data labelled as such. The market's charges, spread, slippage, overnight financing and your leverage apply.
 3. **Confidence.** The result comes with:
    - a **score** (0–100): the deflated Sharpe ratio, the probability that the edge is real after allowing for how many variations you have tried on this market, so tweaking a strategy until it looks good lowers its score;
@@ -368,6 +368,7 @@ Autopilot settings (universe, budget, bar size, stops, capital protection, charg
 - The trade monitor sends one request per minute while positions are open. With a large reasoning model this can take tens of seconds and many tokens; turn reasoning off or lengthen the interval if needed.
 - The NSE holiday list is not bundled; add holidays to the calendar, or cycles simply find no new bars on those days.
 - Fyers endpoints follow the official `fyers-apiv3` SDK, OANDA the official `v20-python` SDK, Zerodha `pykiteconnect`, Upstox `upstox-python-sdk`, Angel One `smartapi-python`, Dhan `dhanhq`, Delta Exchange `delta-rest-client`, and the NVIDIA analyst NVIDIA's OpenAI-compatible API. All were verified against simulated servers, because the brokers' hosts and integrate.api.nvidia.com are unreachable from the build environment. Place a small test order on each new broker before arming it.
+- The strategy lab turns text into validated rules and runs those, not Python code written by the AI: code from a model runs with the platform's broker keys, so one wrong or manipulated answer could do anything. The Python view is generated from the rules for reading. Kimi K3's request options (`reasoning_effort`) follow NVIDIA's model listing, not a live test; if a model rejects an option, the request is retried once with only the essentials.
 - MCX and currency futures are supported through Fyers only; the other Indian brokers trade NSE stocks and ETFs.
 - The WebSocket feeds and the Kotak Neo adapter follow the brokers' official SDKs (`dhanhq`, `fyers-apiv3`, `kotakneoapi`) and were verified against local servers speaking those wire formats, not against the brokers themselves. Kotak Neo's REST quote format is not published, so its quotes are parsed on a best-effort basis and it supplies no candle history (use another broker for history).
 - Order flow is estimated: trades are inferred from volume changes between book updates, so small trades between snapshots merge, and no feed identifies participants. Wall and flow events describe displayed quotes and trades; they are not evidence of anyone's intent.

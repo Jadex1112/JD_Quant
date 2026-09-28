@@ -28,6 +28,17 @@ export function LabPage() {
   const { run, notify } = useApp();
   const [mode, setMode] = useState<"words" | "visual">("words");
   const [builder, setBuilder] = useState<BuilderState>(emptyBuilder);
+  const models = useData(
+    () =>
+      get<{ provider: string | null; default: string | null; presets: { id: string; label: string }[]; available: string[]; switchable: boolean; error?: string | null }>(
+        "/strategy-lab/models",
+      ),
+    [],
+  );
+  const [model, setModel] = useState("");
+  const [customModel, setCustomModel] = useState("");
+  const [view, setView] = useState<"rules" | "code">("rules");
+  const [code, setCode] = useState("");
   const instruments = useData(() => get<Instrument[]>("/instruments"), []);
   const history = useData(() => get<LabRun[]>("/strategy-lab/runs"), []);
   const [text, setText] = useState("");
@@ -48,9 +59,13 @@ export function LabPage() {
 
   const translate = async () => {
     setBusy("translate");
-    const out = await run(() => post<Translation>("/strategy-lab/translate", { text, instrument_id: instrumentId, interval_seconds: interval }));
+    const chosen = model === "custom" ? customModel.trim() : model;
+    const out = await run(() =>
+      post<Translation>("/strategy-lab/translate", { text, instrument_id: instrumentId, interval_seconds: interval, model: chosen || null }),
+    );
     if (out) {
       setTranslation(out);
+      setCode(out.code ?? "");
       setSpecText(JSON.stringify(out.spec, null, 2));
       setResult(null);
     }
@@ -89,13 +104,34 @@ export function LabPage() {
   };
 
   const checkBuilt = async () => {
-    const out = await run(() => post<{ spec: RuleSpec; description: string[] }>("/strategy-lab/check", { spec: toSpec(builder) }));
+    const out = await run(() => post<{ spec: RuleSpec; description: string[]; code: string }>("/strategy-lab/check", { spec: toSpec(builder) }));
     if (out) {
+      setCode(out.code);
       setTranslation({ spec: out.spec, description: out.description, assumptions: [], unsupported: [], model: "visual builder" });
       setSpecText(JSON.stringify(out.spec, null, 2));
       setText("");
       setResult(null);
     }
+  };
+
+  const showCode = async () => {
+    setView("code");
+    try {
+      const spec = JSON.parse(specText);
+      const out = await run(() => post<{ code: string }>("/strategy-lab/code", { spec }));
+      if (out) setCode(out.code);
+    } catch {
+      notify("The rules are not valid JSON.", true);
+    }
+  };
+
+  const downloadCode = () => {
+    const blob = new Blob([code], { type: "text/x-python" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${(translation?.spec.name ? String(translation.spec.name) : "strategy").replace(/[^A-Za-z0-9]+/g, "_").toLowerCase()}.py`;
+    a.click();
+    URL.revokeObjectURL(a.href);
   };
 
   const editVisually = () => {
@@ -195,8 +231,42 @@ export function LabPage() {
             </label>
           </div>
           <div className="row end">
+            {mode === "words" && models.data?.switchable && (
+              <>
+                <label className="field inline small">
+                  AI model
+                  <select value={model} onChange={(e) => setModel(e.target.value)} aria-label="AI model">
+                    <option value="">Default ({models.data.default})</option>
+                    {models.data.presets
+                      .filter((p) => p.id !== models.data!.default)
+                      .map((p) => (
+                        <option key={p.id} value={p.id}>{p.label}</option>
+                      ))}
+                    <option value="custom">Other model id…</option>
+                  </select>
+                </label>
+                {model === "custom" && (
+                  <>
+                    <input
+                      aria-label="Model id"
+                      list="nvidia-models"
+                      placeholder="e.g. moonshotai/kimi-k3"
+                      value={customModel}
+                      onChange={(e) => setCustomModel(e.target.value)}
+                      style={{ minWidth: 260 }}
+                    />
+                    <datalist id="nvidia-models">
+                      {models.data.available.map((m) => <option key={m} value={m} />)}
+                    </datalist>
+                  </>
+                )}
+              </>
+            )}
+            {mode === "words" && models.data && !models.data.provider && (
+              <span className="small muted">No AI configured: set NVIDIA_API_KEY on the server (or use the visual builder).</span>
+            )}
             {mode === "words" ? (
-              <button className="primary" onClick={translate} disabled={!text.trim() || !instrumentId || busy !== ""}>
+              <button className="primary" onClick={translate} disabled={!text.trim() || !instrumentId || busy !== "" || (model === "custom" && !customModel.trim())}>
                 {busy === "translate" ? "The AI is writing the rules…" : "Turn into rules with AI"}
               </button>
             ) : (
@@ -233,17 +303,33 @@ export function LabPage() {
                 <strong>Not expressible as rules, so not tested:</strong> {translation.unsupported.join("; ")}
               </div>
             )}
-            <details>
-              <summary className="small">Edit the rules (JSON)</summary>
+            <div className="segmented" role="group" aria-label="Show the strategy as" style={{ alignSelf: "flex-start" }}>
+              <button className="small" aria-pressed={view === "rules"} onClick={() => setView("rules")}>Rules (JSON)</button>
+              <button className="small" aria-pressed={view === "code"} onClick={showCode}>As Python code</button>
+            </div>
+            {view === "rules" ? (
               <textarea
                 rows={14}
                 value={specText}
                 onChange={(e) => setSpecText(e.target.value)}
                 spellCheck={false}
-                style={{ width: "100%", fontFamily: "monospace", fontSize: 12, marginTop: 6 }}
+                style={{ width: "100%", fontFamily: "monospace", fontSize: 12 }}
                 aria-label="Rules as JSON"
               />
-            </details>
+            ) : (
+              <div className="stack" style={{ gap: 6 }}>
+                <pre className="wrap card" style={{ boxShadow: "none", fontFamily: "monospace", maxHeight: 420, overflow: "auto" }} aria-label="Rules as Python code">
+                  {code || "Generating…"}
+                </pre>
+                <div className="row">
+                  <button className="small" onClick={downloadCode} disabled={!code}>Download .py</button>
+                  <span className="small muted">
+                    Generated from the rules without AI. The platform runs the rules themselves, which are checked before
+                    anything runs; it never executes code an AI wrote.
+                  </span>
+                </div>
+              </div>
+            )}
             <div className="row end">
               <button onClick={editVisually} disabled={!specText}>Edit visually</button>
               <button className="primary" onClick={backtest} disabled={busy !== "" || !specText}>

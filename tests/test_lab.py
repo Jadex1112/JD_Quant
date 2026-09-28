@@ -62,15 +62,21 @@ def test_every_problem_is_reported():
     with pytest.raises(ValidationError) as err:
         validate_spec(
             {
-                "long_entry": {"all": [
-                    {"left": {"ind": "ichimoku"}, "op": ">", "right": {"value": 1}},
-                    {"left": {"ind": "macd", "fast": 30, "slow": 20}, "op": "above", "right": {"value": 0}},
-                    {"left": {"ind": "rsi", "period": 1000}, "op": "<", "right": {"value": "x"}},
-                ]},
+                "long_entry": {
+                    "all": [
+                        {"left": {"ind": "ichimoku"}, "op": ">", "right": {"value": 1}},
+                        {
+                            "left": {"ind": "macd", "fast": 30, "slow": 20},
+                            "op": "above",
+                            "right": {"value": 0},
+                        },
+                        {"left": {"ind": "rsi", "period": 1000}, "op": "<", "right": {"value": "x"}},
+                    ]
+                },
                 "stop_loss_pct": 90,
                 "session": {"tz": "Mars/Olympus", "start": "07:00", "end": "11:00"},
             }
-        )  # fmt: skip
+        )
     fields = {p["field"] for p in err.value.details}
     assert "long_entry.all[0].left" in fields and "long_entry.all[1]" in fields
     assert "long_entry.all[2].left.period" in fields and "long_entry.all[2].right" in fields
@@ -82,9 +88,14 @@ def test_every_problem_is_reported():
 def test_conditions_evaluate_on_closed_bars():
     candles = _candles([100] * 30 + [101, 102, 103, 104, 110])
     breakout = validate_spec(
-        {"long_entry": {"left": {"ind": "close"}, "op": ">",
-                        "right": {"ind": "highest", "period": 20, "source": "high", "offset": 1}}}
-    )["long_entry"]  # fmt: skip
+        {
+            "long_entry": {
+                "left": {"ind": "close"},
+                "op": ">",
+                "right": {"ind": "highest", "period": 20, "source": "high", "offset": 1},
+            }
+        }
+    )["long_entry"]
     assert holds(breakout, candles) and not holds(breakout, candles[:30])
     rising = validate_spec({"long_entry": {"left": {"ind": "close"}, "op": "rising", "bars": 3}})[
         "long_entry"
@@ -115,10 +126,19 @@ def test_rule_strategy_trades_both_sides_with_stops():
     down = [up[-1] - 0.001 * k for k in range(1, 80)]
     tight = Decimal("0.0005")
     candles = [
-        Candle(eur.instrument_id, c.interval_seconds, c.open_ts, c.close_ts, c.open, c.close + tight,
-               c.close - tight, c.close, c.volume)
+        Candle(
+            eur.instrument_id,
+            c.interval_seconds,
+            c.open_ts,
+            c.close_ts,
+            c.open,
+            c.close + tight,
+            c.close - tight,
+            c.close,
+            c.volume,
+        )
         for c in _candles(up + down, instrument=eur.instrument_id)
-    ]  # fmt: skip
+    ]
     spec = {
         **EMA_CROSS,
         "short_entry": {
@@ -159,9 +179,13 @@ class LabChat(ChatModel):
             )
         assert template is STRATEGY_REVIEW
         return json.dumps(
-            {"summary": "It followed the trend.", "strengths": ["trend"], "weaknesses": ["few trades"],
-             "suggestions": ["try a 20/60 pair"]}
-        )  # fmt: skip
+            {
+                "summary": "It followed the trend.",
+                "strengths": ["trend"],
+                "weaknesses": ["few trades"],
+                "suggestions": ["try a 20/60 pair"],
+            }
+        )
 
 
 def _lab(specs=(EMA_CROSS,)):
@@ -188,8 +212,16 @@ def test_translate_validates_and_repairs_once():
 
 def test_backtest_reports_results_confidence_and_an_ai_review():
     h, lab, chat = _lab()
-    run = lab.backtest(EMA_CROSS, TREND, interval_seconds=86400, bars=700, capital=Decimal(500000),
-                       leverage=Decimal(1), user_id="u1", text="ema cross")  # fmt: skip
+    run = lab.backtest(
+        EMA_CROSS,
+        TREND,
+        interval_seconds=86400,
+        bars=700,
+        capital=Decimal(500000),
+        leverage=Decimal(1),
+        user_id="u1",
+        text="ema cross",
+    )
     r = run.results
     assert run.data_source == "broker history" and r["trades"] > 0 and r["return"] > 0
     assert r["benchmark_return"] > 0 and len(r["periods"]) == 4 and r["charges"] > 0
@@ -201,34 +233,69 @@ def test_backtest_reports_results_confidence_and_an_ai_review():
     assert run.equity[0][1] == 1.0 and run.trades
     assert lab.get(run.run_id).results == r  # persisted
     # Trying variations on the same market lowers the confidence of each.
-    again = lab.backtest(EMA_CROSS, TREND, interval_seconds=86400, bars=700, capital=Decimal(500000),
-                         leverage=Decimal(1), user_id="u1")  # fmt: skip
+    again = lab.backtest(
+        EMA_CROSS,
+        TREND,
+        interval_seconds=86400,
+        bars=700,
+        capital=Decimal(500000),
+        leverage=Decimal(1),
+        user_id="u1",
+    )
     assert again.confidence["trials"] == 2 and again.confidence["score"] <= c["score"]
-    other_user = lab.backtest(EMA_CROSS, TREND, interval_seconds=86400, bars=700, capital=Decimal(500000),
-                              leverage=Decimal(1), user_id="u2")  # fmt: skip
+    other_user = lab.backtest(
+        EMA_CROSS,
+        TREND,
+        interval_seconds=86400,
+        bars=700,
+        capital=Decimal(500000),
+        leverage=Decimal(1),
+        user_id="u2",
+    )
     assert other_user.confidence["trials"] == 1
 
 
 def test_synthetic_data_never_earns_high_confidence():
     h, lab, _ = _lab()
     h.series = {}
-    run = lab.backtest(EMA_CROSS, NOISE, interval_seconds=86400, bars=700, capital=Decimal(500000),
-                       leverage=Decimal(1), user_id="u1")  # fmt: skip
+    run = lab.backtest(
+        EMA_CROSS,
+        NOISE,
+        interval_seconds=86400,
+        bars=700,
+        capital=Decimal(500000),
+        leverage=Decimal(1),
+        user_id="u1",
+    )
     assert run.data_source == "synthetic demo data" and run.confidence["grade"] == "Low"
     assert run.confidence["synthetic"] is True
 
 
 def test_leverage_is_capped_by_the_market():
     h, lab, _ = _lab()
-    run = lab.backtest(EMA_CROSS, TREND, interval_seconds=86400, bars=700, capital=Decimal(500000),
-                       leverage=Decimal(10), user_id="u1")  # fmt: skip
+    run = lab.backtest(
+        EMA_CROSS,
+        TREND,
+        interval_seconds=86400,
+        bars=700,
+        capital=Decimal(500000),
+        leverage=Decimal(10),
+        user_id="u1",
+    )
     assert run.leverage == "1" and run.results["leverage_cap"] == "1"  # NSE delivery: no leverage
 
 
 def test_paper_trading_a_tested_strategy():
     h, lab, _ = _lab()
-    run = lab.backtest(EMA_CROSS, TREND, interval_seconds=86400, bars=700, capital=Decimal(500000),
-                       leverage=Decimal(1), user_id="u1")  # fmt: skip
+    run = lab.backtest(
+        EMA_CROSS,
+        TREND,
+        interval_seconds=86400,
+        bars=700,
+        capital=Decimal(500000),
+        leverage=Decimal(1),
+        user_id="u1",
+    )
     deployment = lab.paper_trade(run.run_id, "paper-main", "u1")
     assert deployment.strategy_name == "rules" and deployment.state is DeploymentState.RUNNING
     assert json.loads(deployment.parameters["spec"])["name"] == "EMA trend"
@@ -262,9 +329,15 @@ def test_lab_api(platform):
     assert translated["spec"]["name"] == "EMA trend"
     created = client.post(
         "/api/v1/strategy-lab/backtests",
-        json={"spec": translated["spec"], "instrument_id": TREND, "interval_seconds": 86400, "bars": 500,
-              "capital": "300000", "text": "ema cross please"},
-    )  # fmt: skip
+        json={
+            "spec": translated["spec"],
+            "instrument_id": TREND,
+            "interval_seconds": 86400,
+            "bars": 500,
+            "capital": "300000",
+            "text": "ema cross please",
+        },
+    )
     assert created.status_code == 201, created.text
     run = created.json()
     assert run["data_source"] == "synthetic demo data" and run["confidence"]["grade"] == "Low"
@@ -319,3 +392,67 @@ def test_visual_builder_vocabulary_and_check(app_ctx):
     assert checked["spec"]["long_entry"] and checked["description"]
     bad = client.post("/api/v1/strategy-lab/check", json={"spec": {"long_exit": {}}})
     assert bad.status_code == 400 and bad.json()["errors"][0]["field"] == "long_entry"
+
+
+def test_choose_kimi_or_nemotron_on_nvidia_and_see_the_rules_as_code():
+    import httpx
+
+    from jdquant.ai.analyst import OpenAICompatibleChat, reasoning_options
+
+    assert reasoning_options("nvidia/nemotron-3-ultra-550b-a55b", True) == {
+        "chat_template_kwargs": {"enable_thinking": True}
+    }
+    assert reasoning_options("moonshotai/kimi-k3", True) == {"reasoning_effort": "high"}
+    assert reasoning_options("moonshotai/kimi-k2.6", False) == {"chat_template_kwargs": {"thinking": False}}
+    assert reasoning_options("meta/llama-4", True) == {}
+
+    requests = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/models"):
+            return httpx.Response(
+                200,
+                json={"data": [{"id": "moonshotai/kimi-k3"}, {"id": "nvidia/nemotron-3-ultra-550b-a55b"}]},
+            )
+        body = json.loads(request.content)
+        requests.append(body)
+        if "temperature" in body and body["model"] == "moonshotai/kimi-k3":
+            return httpx.Response(400, json={"error": "temperature is fixed for this model"})
+        answer = {"spec": EMA_CROSS, "assumptions": [], "unsupported": []}
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": json.dumps(answer)}}], "usage": {}}
+        )
+
+    h, lab, _ = _lab()
+    lab.chat = OpenAICompatibleChat(
+        base_url="https://integrate.api.nvidia.com/v1",
+        api_key="test-key",
+        model="nvidia/nemotron-3-ultra-550b-a55b",
+        http=httpx.Client(transport=httpx.MockTransport(handle)),
+    )
+    listed = lab.models()
+    assert listed["default"] == "nvidia/nemotron-3-ultra-550b-a55b" and listed["switchable"]
+    assert "moonshotai/kimi-k3" in listed["available"] and listed["presets"][1]["id"] == "moonshotai/kimi-k3"
+
+    out = lab.translate("buy on an ema cross", TREND, 86400, model="moonshotai/kimi-k3")
+    assert out["model"] == "NVIDIA · moonshotai/kimi-k3"
+    first, retry = requests[-2], requests[-1]
+    assert first["reasoning_effort"] == "high" and "chat_template_kwargs" not in first
+    assert "temperature" not in retry and retry["model"] == "moonshotai/kimi-k3"  # retried with essentials
+    assert "def long_entry(bars) -> bool:" in out["code"] and "ema(bars, period=10" in out["code"]
+    compile(out["code"], "rules.py", "exec")
+
+    lab.translate("buy on an ema cross", TREND, 86400)  # no choice: the configured Nemotron
+    assert requests[-1]["model"] == "nvidia/nemotron-3-ultra-550b-a55b"
+    assert requests[-1]["chat_template_kwargs"] == {"enable_thinking": True}
+    with pytest.raises(ValidationError):
+        lab.translate("buy on an ema cross", TREND, 86400, model="not a model; rm -rf")
+
+
+def test_rules_as_code_endpoint(app_ctx):
+    client = app_ctx[0]
+    code = client.post("/api/v1/strategy-lab/code", json={"spec": EMA_CROSS}).json()["code"]
+    assert "crosses" not in code.split('"""')[-1]  # crosses are spelled out as comparisons
+    assert "ema(bars, period=10, ago=1) <= ema(bars, period=30, ago=1)" in code
+    models = client.get("/api/v1/strategy-lab/models").json()
+    assert "switchable" in models

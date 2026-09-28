@@ -22,6 +22,11 @@ class TranslateIn(BaseModel):
     text: str = Field(min_length=5, max_length=4000)
     instrument_id: str
     interval_seconds: int = Field(default=3600, ge=60, le=86400)
+    model: str | None = Field(default=None, max_length=120)
+
+
+class CheckIn(BaseModel):
+    spec: dict[str, Any]
 
 
 class LabBacktestIn(BaseModel):
@@ -47,11 +52,21 @@ def _lab(request: Request):
 @router.post("/strategy-lab/translate")
 def translate(body: TranslateIn, request: Request, principal: Principal = Depends(require("backtest:run"))):
     """Plain words -> validated rules, with the assumptions made and anything that could not be expressed."""
-    return _lab(request).translate(body.text, body.instrument_id, body.interval_seconds)
+    return _lab(request).translate(body.text, body.instrument_id, body.interval_seconds, body.model)
 
 
-class CheckIn(BaseModel):
-    spec: dict[str, Any]
+@router.get("/strategy-lab/models")
+def models(request: Request, principal: Principal = Depends(require("backtest:run"))) -> dict[str, Any]:
+    """The AI that writes rules, preset NVIDIA models (Nemotron, Kimi) and what the key can reach."""
+    return _lab(request).models()
+
+
+@router.post("/strategy-lab/code")
+def code(body: CheckIn, principal: Principal = Depends(require("backtest:run"))) -> dict[str, str]:
+    """The rules as readable Python, generated without AI; the platform runs the rules themselves."""
+    from jdquant.strategy.rules import rules_to_python
+
+    return {"code": rules_to_python(body.spec)}
 
 
 @router.get("/strategy-lab/vocabulary")
@@ -77,10 +92,10 @@ def vocabulary(principal: Principal = Depends(require("backtest:run"))) -> dict[
 @router.post("/strategy-lab/check")
 def check(body: CheckIn, principal: Principal = Depends(require("backtest:run"))) -> dict[str, Any]:
     """Validate rules built by hand and describe them in plain English (no AI involved)."""
-    from jdquant.strategy.rules import describe, validate_spec
+    from jdquant.strategy.rules import describe, rules_to_python, validate_spec
 
     spec = validate_spec(body.spec)
-    return {"spec": spec, "description": describe(spec)}
+    return {"spec": spec, "description": describe(spec), "code": rules_to_python(spec)}
 
 
 @router.post("/strategy-lab/backtests", status_code=201)

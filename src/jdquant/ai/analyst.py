@@ -32,6 +32,31 @@ log = logging.getLogger(__name__)
 
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 NVIDIA_DEFAULT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b"
+# Models offered by name in the strategy lab; any other model id on the endpoint can be typed in.
+NVIDIA_PRESETS = (
+    ("nvidia/nemotron-3-ultra-550b-a55b", "NVIDIA Nemotron 3 Ultra"),
+    ("moonshotai/kimi-k3", "Kimi K3 (Moonshot AI)"),
+    ("moonshotai/kimi-k2.6", "Kimi K2.6 (Moonshot AI)"),
+)
+MODEL_ID = re.compile(r"^[A-Za-z0-9][\w.\-]*/[\w.\-:]+$")
+
+
+def reasoning_options(model: str, thinking: bool) -> dict[str, Any]:
+    """How each model family switches its reasoning on or off on NVIDIA's endpoint.
+
+    Nemotron takes `chat_template_kwargs.enable_thinking`; Kimi K3 always reasons and takes a top-level
+    `reasoning_effort`; earlier Kimi models take `chat_template_kwargs.thinking`. Other models get nothing.
+    """
+    name = model.lower()
+    if "nemotron" in name:
+        return {"chat_template_kwargs": {"enable_thinking": thinking}}
+    if "kimi-k3" in name:
+        return {"reasoning_effort": "high" if thinking else "low"}
+    if "kimi" in name:
+        return {"chat_template_kwargs": {"thinking": thinking}}
+    return {}
+
+
 SEVERITIES = ("low", "medium", "high")
 
 
@@ -115,9 +140,38 @@ class OpenAICompatibleChat(ChatModel):
         timeout: float = 120.0,
     ):
         self.provider, self.model = provider, model
-        self._url = base_url.rstrip("/") + "/chat/completions"
+        self._base = base_url.rstrip("/")
+        self._url = self._base + "/chat/completions"
         self._key, self._calls, self._timeout = api_key, calls, timeout
         self._http = http or httpx.Client(timeout=timeout)
+        self._models: tuple[float, list[str]] | None = None
+
+    def with_model(self, model: str) -> OpenAICompatibleChat:
+        """The same endpoint, key and call log with another model (e.g. Kimi K3 instead of Nemotron)."""
+        if model == self.model:
+            return self
+        other = OpenAICompatibleChat(
+            base_url=self._base,
+            api_key=self._key,
+            model=model,
+            calls=self._calls,
+            http=self._http,
+            provider=self.provider,
+            timeout=self._timeout,
+        )
+        return other
+
+    def list_models(self) -> list[str]:
+        """Model ids the endpoint offers (cached for ten minutes)."""
+        if self._models and time.monotonic() - self._models[0] < 600:
+            return self._models[1]
+        response = self._http.get(
+            self._base + "/models", headers={"Authorization": f"Bearer {self._key}"}, timeout=20
+        )
+        response.raise_for_status()
+        ids = sorted({str(m.get("id")) for m in response.json().get("data", []) if m.get("id")})
+        self._models = (time.monotonic(), ids)
+        return ids
 
     def ask(self, template, payload, *, max_tokens=16384, timeout=None, thinking=True):
         started = time.monotonic()
@@ -132,15 +186,19 @@ class OpenAICompatibleChat(ChatModel):
             "top_p": 0.95,
             "max_tokens": max_tokens,
             "stream": False,
-            "chat_template_kwargs": {"enable_thinking": thinking},
+            **reasoning_options(self.model, thinking),
         }
         try:
-            response = self._http.post(
-                self._url,
-                json=body,
-                headers={"Authorization": f"Bearer {self._key}"},
-                timeout=timeout or self._timeout,
-            )
+            response = self._post(body, timeout)
+            if response.status_code in (400, 422):
+                # Some models reject sampling or reasoning options: retry once with only the essentials.
+                log.info(
+                    "%s rejected optional parameters (%s); retrying without them",
+                    self.model,
+                    response.text[:200],
+                )
+                minimal = {k: body[k] for k in ("model", "messages", "max_tokens", "stream")}
+                response = self._post(minimal, timeout)
             response.raise_for_status()
             data = response.json()
             message = data["choices"][0]["message"]
@@ -159,6 +217,14 @@ class OpenAICompatibleChat(ChatModel):
             "ok",
         )
         return message.get("content") or ""
+
+    def _post(self, body: dict[str, Any], timeout: float | None) -> httpx.Response:
+        return self._http.post(
+            self._url,
+            json=body,
+            headers={"Authorization": f"Bearer {self._key}"},
+            timeout=timeout or self._timeout,
+        )
 
 
 class ClaudeChat(ChatModel):

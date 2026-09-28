@@ -38,7 +38,7 @@ from jdquant.core.errors import PlatformError, ValidationError
 from jdquant.markets.india import Product
 from jdquant.markets.sessions import session_for
 from jdquant.persistence.codec import decode, encode
-from jdquant.strategy.rules import RuleStrategy, describe, spec_lookback, validate_spec
+from jdquant.strategy.rules import RuleStrategy, describe, rules_to_python, spec_lookback, validate_spec
 
 KIND = "lab_run"
 PERIODS = 4
@@ -78,12 +78,51 @@ class StrategyLab:
 
     # ---- plain words -> rules -------------------------------------------------------------------
 
-    def translate(self, text: str, instrument_id: str, interval_seconds: int) -> dict[str, Any]:
+    def models(self) -> dict[str, Any]:
+        """Which AI writes the rules, and the other models the same NVIDIA key can use."""
+        from jdquant.ai.analyst import NVIDIA_PRESETS, OpenAICompatibleChat
+
+        chat = self.chat
+        if chat is None:
+            return {"provider": None, "default": None, "presets": [], "available": [], "switchable": False}
+        switchable = isinstance(chat, OpenAICompatibleChat)
+        available, error = [], None
+        if switchable:
+            try:
+                available = chat.list_models()
+            except Exception as exc:  # the presets still work; the list is only a convenience
+                error = f"could not list models: {str(exc)[:200]}"
+        return {
+            "provider": chat.provider,
+            "default": chat.model,
+            "presets": [{"id": m, "label": label} for m, label in NVIDIA_PRESETS] if switchable else [],
+            "available": available,
+            "switchable": switchable,
+            "error": error,
+        }
+
+    def translate(
+        self, text: str, instrument_id: str, interval_seconds: int, model: str | None = None
+    ) -> dict[str, Any]:
+        from jdquant.ai.analyst import MODEL_ID, OpenAICompatibleChat
+
         if self.chat is None:
             raise PlatformError(
                 "AI_UNAVAILABLE",
                 "set NVIDIA_API_KEY (or an Anthropic key) on the server to translate strategies",
             )
+        chat = self.chat
+        if model:
+            if not isinstance(chat, OpenAICompatibleChat):
+                raise PlatformError(
+                    "MODEL_NOT_SWITCHABLE",
+                    f"{chat.provider} is configured; set NVIDIA_API_KEY to choose models",
+                )
+            if not MODEL_ID.match(model) or len(model) > 120:
+                raise ValidationError(
+                    "MODEL_INVALID", [{"field": "model", "message": "a model id like moonshotai/kimi-k3"}]
+                )
+            chat = chat.with_model(model)
         instrument = self._p.instruments.get(instrument_id)
         payload: dict[str, Any] = {
             "text": text[:4000],
@@ -98,9 +137,11 @@ class StrategyLab:
         }
         problems: list[dict[str, str]] = []
         for _ in range(2):  # one repair attempt when the rules come back invalid
-            answer = _json(self.chat.ask(STRATEGY_BUILDER, payload, max_tokens=8192))
+            answer = _json(chat.ask(STRATEGY_BUILDER, payload, max_tokens=16384, timeout=300))
             if answer is None:
-                raise PlatformError("AI_NO_ANSWER", f"{self.chat.provider} did not return rules; try again")
+                raise PlatformError(
+                    "AI_NO_ANSWER", f"{chat.provider} {chat.model} did not return rules; try again"
+                )
             try:
                 spec = validate_spec(answer.get("spec"))
             except ValidationError as exc:
@@ -112,7 +153,8 @@ class StrategyLab:
                 "description": describe(spec),
                 "assumptions": [str(x)[:300] for x in answer.get("assumptions") or []][:12],
                 "unsupported": [str(x)[:300] for x in answer.get("unsupported") or []][:12],
-                "model": f"{self.chat.provider} · {self.chat.model}",
+                "model": f"{chat.provider} · {chat.model}",
+                "code": rules_to_python(spec),
             }
         raise ValidationError("RULES_INVALID", problems)
 
