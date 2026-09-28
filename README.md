@@ -5,7 +5,7 @@ Institutional-grade, AI-driven quantitative trading platform.
 This repository contains:
 
 1. **[Volume 2 – Master Software Requirements Specification](docs/srs/README.md)**: 100 chapters and 1,109 uniquely identified requirements covering functional and non-functional requirements, interfaces, system behaviour, and acceptance criteria.
-2. **The platform (`src/jdquant`)**: a single-node (T1, CON-009) modular monolith with a persistent trading core, an AI autopilot that researches, backtests and trades on its own, login and permissions, OANDA (spot gold XAU/USD and forex), Fyers (NSE stocks and ETFs, MCX commodities, NSE currency futures), Binance (crypto, including tokenized gold) and Alpaca connectivity, an AI that takes trades each minute from the signals of walk-forward-tested strategies and learns from its losing trades, live price charts, and a REST API.
+2. **The platform (`src/jdquant`)**: a single-node (T1, CON-009) modular monolith with a persistent trading core, an AI autopilot that researches, backtests and trades on its own, login and permissions, broker connections like TradingView's (OANDA for spot gold XAU/USD and forex; Fyers, Zerodha Kite, Upstox, Angel One and Dhan for NSE stocks and ETFs, with MCX and currency futures on Fyers; Delta Exchange India for crypto perpetuals; Binance and Alpaca), leverage where the market allows it, a strategy lab where you type a strategy in plain words and the AI backtests it with a confidence score, an AI that takes trades each minute from the signals of walk-forward-tested strategies and learns from its losing trades, live price charts, and a REST API.
 3. **The web UI (`web/`)**: a React single-page app served by the same process.
 
 ## Quick start
@@ -33,7 +33,7 @@ Development: `npm run dev` in `web/` serves the UI with hot reload on port 5173 
 Tests and checks:
 
 ```bash
-.venv/bin/pytest                     # 253 tests, traced to SRS acceptance criteria
+.venv/bin/pytest                     # 297 tests, traced to SRS acceptance criteria
 .venv/bin/ruff check . && .venv/bin/ruff format --check .
 (cd web && npm run typecheck)
 ```
@@ -46,10 +46,10 @@ Open **AI Autopilot**, pick what it may trade and a paper budget, and press **Ru
 |---|---|---|---|
 | **Gold (XAU/USD), silver** | Spot `OANDA:XAU_USD`, `OANDA:XAG_USD` | OANDA | Sunday 18:00 to Friday 17:00 New York, 1-hour daily break |
 | **Forex** | EUR/USD, GBP/USD, USD/JPY, AUD/USD, USD/CAD, USD/CHF and the rest of OANDA's list | OANDA | Sunday 17:05 to Friday 17:00 New York |
-| Stocks and ETFs (incl. gold and silver ETFs such as GOLDBEES) | NSE cash | Fyers | 09:15–15:30 IST |
+| Stocks and ETFs (incl. gold and silver ETFs such as GOLDBEES) | NSE cash | Fyers, Zerodha Kite, Upstox, Angel One or Dhan | 09:15–15:30 IST |
 | Commodities (gold, silver, crude oil…) | MCX futures, as rolling front months like `MCX:GOLDM1!` | Fyers | 09:00–23:30 IST |
 | Currency (USDINR…) | NSE currency futures, e.g. `NSE:USDINR1!` | Fyers | 09:00–17:00 IST |
-| Crypto | BTC/USDT, ETH/USDT… | Binance | 24/7 |
+| Crypto | BTC/USDT, ETH/USDT… spot; BTCUSD, ETHUSD… perpetual futures (long or short) | Binance; Delta Exchange India | 24/7 |
 | Gold in US dollars (XAU/USD) | PAXG/USDT, a token backed by one troy ounce of gold | Binance | 24/7 |
 
 **XAU/USD and forex are the main focus.** In the autopilot settings, **Focus: XAU/USD & forex** sets the universe to spot gold and the major pairs on 1-hour bars. Demo instruments for them exist from the start, so you can research and paper trade before connecting OANDA.
@@ -93,6 +93,21 @@ Each cycle:
 6. **Go live only when you say so.** A strategy with a clean paper record (default 10 days, 2 trades) moves to a real account only while you have armed that account with a capital cap. Each broker account is armed separately. Futures on an account need their own opt-in. Arming is an MFA-verified action. Disarming closes the live positions.
 
 These limits bound losses; they cannot guarantee profits. Markets can gap through stops, and a strategy that passed every test can still stop working.
+
+### Leverage
+
+**Leverage** in the autopilot settings (default 1, meaning none) lets a position control more than its share of the budget, but never more than its market allows:
+
+| Market | Most leverage used |
+|---|---|
+| Forex (OANDA) | 30× |
+| Gold, silver and other metals (OANDA) | 20× |
+| Futures (MCX, NSE currency) | 10× |
+| Crypto perpetuals (Delta Exchange) | 10× (exchanges offer more; the platform stops here) |
+| NSE stocks, intraday | 5× |
+| NSE stocks for delivery, crypto spot | none |
+
+Your broker may allow less. Leverage scales position size, and research, backtests and paper trading all use the same figure, so the reported drawdowns include it. It does not loosen any limit: sizes still follow the volatility target, shrink as capital protection tightens, and the loss floor, daily loss limit and drawdown halt are measured on the budget, not on the leveraged exposure. Leverage multiplies losses as much as gains. It is mainly useful for gold, where one unit can be larger than a small unlevered budget per position.
 
 ### The AI takes the trades, based on the tested strategies
 
@@ -150,6 +165,27 @@ The request uses `nvidia/nemotron-3-ultra-550b-a55b` with reasoning enabled (`en
 
 When the strategies trade on their own, research, paper and live run the same strategy code with the same parameters, so what was backtested is what trades. When the AI trades, it chooses among those same tested signals, and its own decisions are measured live. Risk limits and the kill switch apply to the autopilot exactly as to manual trading.
 
+## Strategy lab: type a strategy, the AI backtests it
+
+Open **Strategy lab**, pick an instrument and bar size, and describe a strategy in plain words, for example *"buy gold when the 20-hour average crosses above the 50-hour average and RSI is under 70; exit on the opposite cross or a 1% stop"*.
+
+1. **Translate.** The AI turns the text into rules: JSON built from a fixed set of indicators and conditions, never code, so nothing it writes can run arbitrary instructions. It lists every assumption it made and anything it could not express. Invalid rules go back to the AI once for repair. The rules are shown in plain English so you can check them before anything runs.
+2. **Backtest.** The rules run on broker history when a broker is connected, otherwise on synthetic data labelled as such. The market's charges, spread, slippage, overnight financing and your leverage apply.
+3. **Confidence.** The result comes with:
+   - a **score** (0–100): the deflated Sharpe ratio, the probability that the edge is real after allowing for how many variations you have tried on this market, so tweaking a strategy until it looks good lowers its score;
+   - the **probability of profit**, from resampling the trades 2,000 times;
+   - the autopilot's checks: at least 10 trades, drawdown under 25%, profitable in most of the four periods and in the last one, charges under half the gross profit, and beating buy and hold.
+
+   The grade is **High** (score 90 or more and every check passed), **Medium** (75 or more, at most one check failed) or **Low**. Synthetic data is always Low.
+4. **AI review.** The AI explains the result in plain language and suggests what to test next.
+5. **Paper trade.** One click deploys the rules on a paper account, where they trade live prices. Real money comes only through the autopilot's promotion and arming rules.
+
+A high score is evidence, not a promise: markets change, and one instrument's past can mislead.
+
+## Paper trading a backtest
+
+On **Backtests**, after a run press **Paper trade this…**. It deploys the same strategy and parameters on a paper account, so you can watch the backtested strategy trade live prices with simulated money before trusting it. The backtest form also chooses the data (broker history or synthetic) and the charges model of the market.
+
 ## Live charts
 
 **Markets** (opening on XAU/USD) and **Trading** show a candlestick chart (1m, 5m, 15m, 1h, 1D) for the selected instrument, with your fills marked as arrows. The chart loads broker history when available, then updates with every quote through a server-sent event stream (`/api/v1/market-data/stream`). Each chart is badged as **LIVE**, **SIMULATED** (demo feed) or **OFFLINE**.
@@ -161,6 +197,26 @@ When the strategies trade on their own, research, paper and live run the same st
 3. Gold, silver and every currency pair on the account are loaded. Prices stream to the charts and paper accounts, and hourly or minute history feeds the autopilot's research.
 
 Orders are fill-or-kill market orders or limit orders, tagged with the platform's order ID so they can be looked up and cancelled. The adapter follows OANDA's v20 REST API as published in its official `v20-python` SDK. It was verified against a simulated OANDA server, because OANDA's hosts are unreachable from the build environment.
+
+## Brokers
+
+**Connections → Add connection** lists the brokers like TradingView does, filtered by India or Global:
+
+| Broker | Markets | How it signs in |
+|---|---|---|
+| **Fyers** | NSE stocks and ETFs, MCX commodity futures, NSE currency futures | Sign in with Fyers; with the PIN stored, renews by itself for up to 15 days |
+| **Zerodha Kite** | NSE stocks and ETFs | Sign in with Kite once a day (Kite sessions end at 06:00 IST) |
+| **Upstox** | NSE stocks and ETFs | Sign in with Upstox once a day (sessions end at 03:30 IST) |
+| **Angel One** | NSE stocks and ETFs | Signs in by itself each day with the client code, PIN and TOTP secret |
+| **Dhan** | NSE stocks and ETFs | Client ID and a 24-hour access token from web.dhan.co; paste a new one with **Rotate keys** |
+| **OANDA** | Spot gold and silver, forex | API token and account ID; practice account by default |
+| **Delta Exchange India** | Crypto perpetual futures, long or short | API key and secret; testnet by default |
+| **Binance** | Crypto spot | API key and secret; testnet by default |
+| **Alpaca** | US stocks | API key and secret; paper by default |
+
+For the sign-in brokers (Fyers, Kite, Upstox), set the app's redirect URL to `http://127.0.0.1:8000/api/v1/connections/oauth/callback` (or your `JDQ_PUBLIC_URL`); the sign-in dialog shows the exact URL. Every credential and session token is stored encrypted.
+
+The same NSE stock through several brokers is one instrument (`NSE:RELIANCE-EQ`), so charts, research and positions line up; each broker keeps its own reference for it. Choose Delivery (CNC) or Intraday per connection. Orders carry the platform's order ID as a tag, so the order book can be matched up after a restart. Zerodha, Upstox, Angel One and Dhan have no test environment: real orders happen only when you trade on the account yourself or arm the autopilot. MCX and currency futures are traded through Fyers only.
 
 ## Fyers
 
@@ -176,14 +232,14 @@ NSE equities and ETFs, MCX commodity futures and NSE currency futures (front con
 |---|---|
 | **Trading** | Market and limit orders with idempotency keys, modify (native replace or cancel-then-new) and cancel, cancel-all, fills and positions with FIFO/average cost and realized/unrealized P&L. |
 | **Risk** | Scoped risk profiles (most restrictive limit wins), pre-trade checks that fail closed, daily loss → reduce-only, kill switches (block, cancel, flatten) with audited release. |
-| **Autopilot** | Automated multi-asset research, walk-forward backtesting with market-specific charges, luck rejection, volatility-targeted allocation, loss floor and drawdown halts, futures rolling, paper deployment, monitoring, retirement and per-account live promotion, with a decision log and an LLM analyst (see above). |
+| **Autopilot** | Automated multi-asset research with optional leverage, walk-forward backtesting with market-specific charges, luck rejection, volatility-targeted allocation, loss floor and drawdown halts, futures rolling, paper deployment, monitoring, retirement and per-account live promotion, with a decision log and an LLM analyst (see above). |
 | **Strategies** | Manual templates (MA crossover, RSI mean reversion, Bollinger reversion, Donchian breakout, ML signal) plus the autopilot strategy (12 signals, long and short) and a cross-sectional rotation strategy. Deployments go through approve → start → pause/resume → stop/flatten → retire. |
-| **Backtesting** | Event-driven, no look-ahead, next-bar fills, fees and slippage, and a reproducibility hash. |
+| **Backtesting** | Event-driven, no look-ahead, next-bar fills, fees, slippage and financing, a reproducibility hash, and one-click paper trading of a run. The strategy lab backtests strategies typed in plain words and reports a luck-adjusted confidence. |
 | **Persistence** | SQLite (WAL, full sync) holding orders, fills, positions, deployments, kill switches, risk state, users, audit and models. On restart the platform starts in RECOVERING mode, restores state, reconciles in-flight orders with venues and only then accepts orders. Failure drops it to SAFE mode. |
 | **Security** | scrypt passwords, server-side sessions (HttpOnly cookie + CSRF token, 30-minute idle and 12-hour absolute limits), bearer tokens, scoped API keys (`X-API-Key`), TOTP MFA with recovery codes, step-up MFA for privileged actions, lockout, 12 built-in roles, and a hash-chained audit log you can verify. |
-| **Venues** | OANDA (spot gold and forex, v20), Fyers (NSE equities, API v3), Binance Spot and Alpaca adapters: Fyers OAuth sign-in with unattended renewal, signed requests, clock-offset correction, rate limiting, error mapping, native order modify, and fill polling. Credentials and tokens are encrypted at rest and keys with withdrawal permission are refused. Fills carry the charges of their market (NSE, MCX, currency, crypto); per-market session calendars cover trading hours and intraday cutoffs. |
+| **Venues** | OANDA (spot gold and forex, v20), Fyers (NSE equities and futures, API v3), Zerodha Kite, Upstox, Angel One, Dhan (NSE equities), Delta Exchange India (crypto perpetuals), Binance Spot and Alpaca adapters: OAuth sign-in (Fyers, Kite, Upstox), TOTP sign-in (Angel One), Fyers unattended renewal with unattended renewal, signed requests, clock-offset correction, rate limiting, error mapping, native order modify, and fill polling. Credentials and tokens are encrypted at rest and keys with withdrawal permission are refused. Fills carry the charges of their market (NSE, MCX, currency, crypto); per-market session calendars cover trading hours and intraday cutoffs. |
 | **AI** | A feature store that computes features the same way online and offline; logistic/ridge models trained on a purged time split; evaluation reports with cost-adjusted trading metrics; a model registry (staging → shadow → production gate, rollback, shadow scoring, drift alerts); a portfolio optimizer; and a Claude copilot that can read platform state and propose actions that you confirm before they run. |
-| **Web UI** | Dashboard, trading ticket, markets, strategies, live candlestick charts, AI autopilot, backtests with equity chart, risk and kill switches, AI models, connections, users and audit, and account settings (MFA, sessions, API keys). Dark theme by default (light available), works down to phone width, and prompts for MFA step-up in place. |
+| **Web UI** | Dashboard, trading ticket, markets, strategies, live candlestick charts, AI autopilot, strategy lab, backtests with equity chart, risk and kill switches, AI models, connections, users and audit, and account settings (MFA, sessions, API keys). Dark theme by default (light available), works down to phone width, and prompts for MFA step-up in place. |
 
 ## Configuration
 
@@ -218,7 +274,7 @@ Autopilot settings (universe, budget, bar size, stops, capital protection, charg
         ▲                   ▼        │ execution reports
    market data      Account router (connectivity/)
    (marketdata/)      ├─ paper → simulated venue (execution/)
-        ▲             └─ live  → Fyers / Binance / Alpaca adapters ◀── poller
+        ▲             └─ live  → broker adapters ◀── poller
    AI autopilot (autopilot/): research → walk-forward backtests → deploy / retire / promote
         │
    Event bus (core/events) ── persistence subscribers ──▶ SQLite journal (persistence/)
@@ -239,9 +295,9 @@ Autopilot settings (universe, budget, bar size, stops, capital protection, charg
 | `backtest`, `analytics` | 25, 31–32 | Backtester and metric library |
 | `persistence` | 51, 83, 92 | SQLite store with migrations, journal, recovery |
 | `security` | 39–40, 42 | Passwords, TOTP, sessions, API keys, roles, encrypted secrets, audit chain |
-| `connectivity` | 45–46 | Venue adapter contract, Fyers, Binance and Alpaca adapters, broker OAuth, account router, connection manager, poller |
+| `connectivity` | 45–46 | Venue adapter contract, OANDA, Fyers, Zerodha Kite, Upstox, Angel One, Dhan, Delta Exchange, Binance and Alpaca adapters, broker OAuth, account router, connection manager, poller |
 | `markets` | — | Charges for NSE cash, MCX, currency futures, crypto, and forex spread and financing; per-market sessions (incl. forex 24/5) and asset groups |
-| `autopilot` | 24–25, 57 | Autopilot strategies (incl. the AI trader), candidate generation, walk-forward research with deflated Sharpe, the controller, the per-minute AI trader and monitor, and lessons from losing trades |
+| `autopilot` | 24–25, 57 | Autopilot strategies (incl. the AI trader), the strategy lab, candidate generation, walk-forward research with deflated Sharpe, the controller, the per-minute AI trader and monitor, and lessons from losing trades |
 | `ai` | 52–59, 63 | Features, training, model registry, optimizer, prompts, copilot and its tools, the autopilot analyst |
 | `api` | 80 | `/api/v1` REST resources with problem-details errors; serves the web UI |
 
@@ -251,12 +307,13 @@ Autopilot settings (universe, budget, bar size, stops, capital protection, charg
 - API keys are random secrets stored only as hashes and sent as a header. The SRS also describes HMAC request signing, which would need the server to keep a recoverable secret; that was not implemented.
 - OCO/bracket orders, execution algorithms, NAV and capital flows, reporting, and notifications (Chapters 21.8, 22.6, 23, 33, 37) are not built yet.
 - Single node only (T1). There is no clustering or failover.
-- Shorting is limited to futures; NSE cash and crypto spot are long-only (shares cannot be shorted overnight). Market-neutral pairs are a natural next step.
+- Shorting is limited to futures, forex, metals and crypto perpetuals; NSE cash and crypto spot are long-only (shares cannot be shorted overnight). Market-neutral pairs are a natural next step.
 - Market making and latency arbitrage (as run by firms like Jane Street) need co-location and exchange-level connectivity, which retail REST APIs cannot provide, so they are not attempted.
 - The MCX lots convention follows the Fyers symbol master but was not confirmed against a real account; futures stay off until you opt in per account.
 - Crypto and forex are sized from the INR budget. The ₹/USD (and ₹/USDT) rate is set in the settings. Other currencies convert through the dollar at live OANDA prices when available, otherwise at defaults.
 - Paper trading charges the spread but not overnight financing (backtests charge both). Live OANDA accounts book financing themselves.
 - The trade monitor sends one request per minute while positions are open. With a large reasoning model this can take tens of seconds and many tokens; turn reasoning off or lengthen the interval if needed.
 - The NSE holiday list is not bundled; add holidays to the calendar, or cycles simply find no new bars on those days.
-- Fyers endpoints follow the official `fyers-apiv3` SDK, OANDA the official `v20-python` SDK, and the NVIDIA analyst NVIDIA's OpenAI-compatible API. All were verified against simulated servers, because fyers.in, OANDA and integrate.api.nvidia.com are unreachable from the build environment.
+- Fyers endpoints follow the official `fyers-apiv3` SDK, OANDA the official `v20-python` SDK, Zerodha `pykiteconnect`, Upstox `upstox-python-sdk`, Angel One `smartapi-python`, Dhan `dhanhq`, Delta Exchange `delta-rest-client`, and the NVIDIA analyst NVIDIA's OpenAI-compatible API. All were verified against simulated servers, because the brokers' hosts and integrate.api.nvidia.com are unreachable from the build environment. Place a small test order on each new broker before arming it.
+- MCX and currency futures are supported through Fyers only; the other Indian brokers trade NSE stocks and ETFs.
 - Paper trading needs live prices: without a Fyers connection, NSE deployments wait for quotes and research uses synthetic demo data (the page says so).

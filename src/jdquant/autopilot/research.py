@@ -34,7 +34,7 @@ from jdquant.autopilot.strategy import SHORTABLE
 from jdquant.backtest.engine import BacktestConfig, run_backtest
 from jdquant.core.errors import PlatformError
 from jdquant.execution.simulator import FeeSchedule
-from jdquant.marketdata.instruments import Instrument
+from jdquant.marketdata.instruments import AssetClass, Instrument
 from jdquant.marketdata.records import Candle
 from jdquant.markets.india import MarketFees, Product
 from jdquant.markets.india import fees_for as market_fees_for
@@ -142,7 +142,13 @@ def candidate_grid(interval_seconds: int = 86400) -> list[Candidate]:
 
 
 # The most leverage each kind of market offers retail accounts (brokers may allow less).
-MAX_LEVERAGE = {"forex": Decimal(30), "metal": Decimal(20), "future": Decimal(10), "intraday": Decimal(5)}
+MAX_LEVERAGE = {
+    "forex": Decimal(30),
+    "metal": Decimal(20),
+    "future": Decimal(10),
+    "crypto_perp": Decimal(10),  # exchanges offer far more; 10x is where the platform stops
+    "intraday": Decimal(5),
+}
 
 
 def market_leverage(instrument: Instrument, intraday: bool) -> tuple[Decimal, str]:
@@ -152,6 +158,8 @@ def market_leverage(instrument: Instrument, intraday: bool) -> tuple[Decimal, st
         return MAX_LEVERAGE[kind], kind
     if instrument.is_future:
         return MAX_LEVERAGE["future"], "future"
+    if instrument.asset_class is AssetClass.CRYPTO_PERPETUAL:
+        return MAX_LEVERAGE["crypto_perp"], "crypto_perp"
     if intraday and instrument.venue == "NSE":
         return MAX_LEVERAGE["intraday"], "intraday"
     return Decimal(1), "cash"

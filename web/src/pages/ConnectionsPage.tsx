@@ -79,7 +79,7 @@ export function ConnectionsPage() {
                       <strong>{c.name}</strong>
                       {!c.has_credentials && <div className="small muted">market data only</div>}
                     </td>
-                    <td>{c.venue}</td>
+                    <td>{brokerName(c.venue)}</td>
                     <td>{c.environment === "PRODUCTION" ? <StatusBadge status="LIVE" /> : c.environment}</td>
                     <td title={c.last_error ?? undefined}>
                       <StatusBadge status={c.status} />
@@ -101,7 +101,7 @@ export function ConnectionsPage() {
                             {c.status === "LOGIN_REQUIRED" ? "Sign in" : "Sign in again"}
                           </button>
                         )}
-                        {c.requires_login && c.account_id && can("connection:rotate") && (
+                        {c.venue === "FYERS" && c.account_id && can("connection:rotate") && (
                           <button className="small" onClick={() => setPinFor(c)}>PIN</button>
                         )}
                         {can("connection:update") && c.status !== "DISABLED" && c.status !== "LOGIN_REQUIRED" && (
@@ -243,63 +243,174 @@ export function ConnectionsPage() {
   );
 }
 
+interface BrokerSpec {
+  label: string;
+  markets: string;
+  region: "India" | "Global";
+  currency: string;
+  keyLabel: string;
+  secretLabel?: string;
+  keyHint?: string;
+  login?: boolean; // browser sign-in after saving
+  product?: boolean; // delivery or intraday
+  environments?: [string, string][]; // [value, label], first is the default
+  totp?: boolean; // Angel One: client code, PIN and TOTP secret
+  optionalKeys?: boolean;
+  help: string;
+  warn?: string;
+}
+
+export const BROKERS: Record<string, BrokerSpec> = {
+  FYERS: {
+    label: "Fyers", markets: "NSE stocks & ETFs, MCX, currency futures", region: "India", currency: "INR",
+    keyLabel: "App ID", keyHint: "e.g. XA1234-100", secretLabel: "Secret key", login: true, product: true,
+    help: "Create an app at myapi.fyers.in, then sign in on the next step. With your PIN stored, sessions renew by themselves.",
+  },
+  KITE: {
+    label: "Zerodha Kite", markets: "NSE stocks & ETFs", region: "India", currency: "INR",
+    keyLabel: "API key", secretLabel: "API secret", login: true, product: true,
+    help: "Create a Kite Connect app at developers.kite.trade and set its redirect URL to this app's callback (shown on the next step). Kite sessions end at 06:00 IST, so sign in each trading day.",
+  },
+  UPSTOX: {
+    label: "Upstox", markets: "NSE stocks & ETFs", region: "India", currency: "INR",
+    keyLabel: "API key", secretLabel: "API secret", login: true, product: true,
+    help: "Create an app at account.upstox.com/developer/apps with this app's callback as the redirect URL. Upstox sessions end at 03:30 IST, so sign in each trading day.",
+  },
+  ANGELONE: {
+    label: "Angel One", markets: "NSE stocks & ETFs", region: "India", currency: "INR",
+    keyLabel: "SmartAPI key", totp: true, product: true,
+    help: "Create a SmartAPI app at smartapi.angelone.in and enable TOTP for your account. With the client code, PIN and TOTP secret (all stored encrypted), the platform signs in by itself every day.",
+  },
+  DHAN: {
+    label: "Dhan", markets: "NSE stocks & ETFs", region: "India", currency: "INR",
+    keyLabel: "Client ID", secretLabel: "Access token", product: true,
+    help: "On web.dhan.co open Profile → DhanHQ Trading APIs and generate an access token. It is valid for 24 hours; paste a new one with Rotate credentials when it expires.",
+  },
+  OANDA: {
+    label: "OANDA", markets: "Spot gold XAU/USD, silver, forex", region: "Global", currency: "USD",
+    keyLabel: "API token", keyHint: "Manage API Access in your OANDA hub", secretLabel: "Account ID",
+    environments: [["TESTNET", "Practice account (virtual money)"], ["PRODUCTION", "Live account (real money)"]],
+    help: "Generate a token under Manage API Access in the OANDA hub; the account ID looks like 101-001-1234567-001.",
+    warn: "Indian residents: RBI rules allow forex trading only in INR pairs and EUR/USD, GBP/USD and USD/JPY on recognised Indian exchanges; leveraged forex or gold trading with overseas brokers is not permitted under FEMA. A practice account uses virtual money with live prices — use it to research and paper trade XAU/USD and forex. For real money, use NSE currency futures or MCX gold through Fyers.",
+  },
+  DELTA: {
+    label: "Delta Exchange India", markets: "Crypto perpetual futures (BTC, ETH…)", region: "India", currency: "USD",
+    keyLabel: "API key", secretLabel: "API secret",
+    environments: [["TESTNET", "Testnet (test funds)"], ["PRODUCTION", "Live (real money)"]],
+    help: "Create an API key with trading permission (never withdrawals) at india.delta.exchange → API keys; the testnet has its own keys.",
+    warn: "Perpetual futures are leveraged and can be liquidated. The platform caps crypto leverage at 10× and applies your risk limits.",
+  },
+  BINANCE: {
+    label: "Binance", markets: "Crypto spot, tokenized gold (PAXG)", region: "Global", currency: "USDT",
+    keyLabel: "API key", secretLabel: "API secret", optionalKeys: true,
+    environments: [["TESTNET", "Testnet"], ["PRODUCTION", "Production (real money)"]],
+    help: "Keys are optional for market data only. Keys with withdrawal permission are refused.",
+  },
+  ALPACA: {
+    label: "Alpaca", markets: "US stocks", region: "Global", currency: "USD",
+    keyLabel: "API key", secretLabel: "API secret",
+    environments: [["TESTNET", "Paper"], ["PRODUCTION", "Live (real money)"]],
+    help: "Create keys in the Alpaca dashboard (paper and live keys differ).",
+  },
+};
+
+export function brokerName(venue: string): string {
+  return BROKERS[venue]?.label ?? venue;
+}
+
 function CreateConnection({ onClose }: { onClose: (created?: Connection) => void }) {
   const { run } = useApp();
+  const [venue, setVenue] = useState<string | null>(null);
   const [name, setName] = useState("");
-  const [venue, setVenue] = useState("FYERS");
-  const [environment, setEnvironment] = useState("TESTNET");
+  const [environment, setEnvironment] = useState("PRODUCTION");
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
-  const [baseCurrency, setBaseCurrency] = useState("INR");
+  const [clientCode, setClientCode] = useState("");
+  const [pin, setPin] = useState("");
+  const [totp, setTotp] = useState("");
   const [product, setProduct] = useState("CNC");
   const [busy, setBusy] = useState(false);
-  const fyers = venue === "FYERS";
-  const oanda = venue === "OANDA";
+  const [filter, setFilter] = useState<"All" | "India" | "Global">("All");
+  const spec = venue ? BROKERS[venue] : null;
+
+  const pick = (v: string) => {
+    const b = BROKERS[v];
+    setVenue(v);
+    setName(b.label);
+    setEnvironment(b.environments ? b.environments[0][0] : "PRODUCTION");
+  };
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!venue || !spec) return;
     setBusy(true);
+    const secret = spec.totp ? JSON.stringify({ client_code: clientCode, pin, totp_secret: totp.replaceAll(" ", "") }) : apiSecret;
     const created = await run(
       () =>
         post<Connection>("/connections", {
           name,
           venue,
-          environment: fyers ? "PRODUCTION" : environment,
+          environment,
           api_key: apiKey || null,
-          api_secret: apiSecret || null,
-          base_currency: fyers ? "INR" : baseCurrency,
-          settings: fyers ? { product } : {},
+          api_secret: secret || null,
+          base_currency: spec.currency,
+          settings: spec.product ? { product } : {},
         }),
-      fyers ? "Fyers app saved — sign in to finish" : "Connection added",
+      spec.login ? `${spec.label} app saved — sign in to finish` : "Connection added",
     );
     setBusy(false);
     if (created) onClose(created);
   };
+
+  if (!venue || !spec) {
+    const shown = Object.entries(BROKERS).filter(([, b]) => filter === "All" || b.region === filter);
+    return (
+      <Dialog title="Connect a broker" onClose={() => onClose()}>
+        <div className="stack">
+          <div className="segmented" role="group" aria-label="Region" style={{ alignSelf: "flex-start" }}>
+            {(["All", "India", "Global"] as const).map((r) => (
+              <button key={r} className="small" aria-pressed={filter === r} onClick={() => setFilter(r)}>
+                {r}
+              </button>
+            ))}
+          </div>
+          <div className="grid two">
+            {shown.map(([v, b]) => (
+              <button key={v} className="card" style={{ textAlign: "left", cursor: "pointer" }} onClick={() => pick(v)}>
+                <strong>{b.label}</strong>
+                <div className="small muted">{b.markets}</div>
+                <div className="small muted">{b.login ? "sign in with the broker" : b.totp ? "signs in by itself" : "API keys"}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+      </Dialog>
+    );
+  }
+
   return (
-    <Dialog title="Add connection" onClose={() => onClose()}>
+    <Dialog title={`Connect ${spec.label}`} onClose={() => onClose()}>
       <form className="stack" onSubmit={submit} autoComplete="off">
+        <div className="row">
+          <button type="button" className="link small" onClick={() => setVenue(null)}>← All brokers</button>
+          <span className="small muted">{spec.markets}</span>
+        </div>
         <div className="form-grid">
           <label className="field">
             Name
-            <input required value={name} onChange={(e) => setName(e.target.value)} placeholder="Binance testnet" />
+            <input required value={name} onChange={(e) => setName(e.target.value)} />
           </label>
-          <label className="field">
-            Venue
-            <select
-              value={venue}
-              onChange={(e) => {
-                setVenue(e.target.value);
-                setBaseCurrency(
-                  e.target.value === "ALPACA" || e.target.value === "OANDA" ? "USD" : e.target.value === "FYERS" ? "INR" : "USDT",
-                );
-              }}
-            >
-              <option value="FYERS">Fyers (NSE stocks, MCX, currency futures)</option>
-              <option value="OANDA">OANDA (spot gold XAU/USD, forex)</option>
-              <option value="BINANCE">Binance Spot</option>
-              <option value="ALPACA">Alpaca (US equities)</option>
-            </select>
-          </label>
-          {fyers ? (
+          {spec.environments && (
+            <label className="field">
+              Environment
+              <select value={environment} onChange={(e) => setEnvironment(e.target.value)}>
+                {spec.environments.map(([value, label]) => (
+                  <option key={value} value={value}>{label}</option>
+                ))}
+              </select>
+            </label>
+          )}
+          {spec.product && (
             <label className="field">
               Product
               <select value={product} onChange={(e) => setProduct(e.target.value)}>
@@ -307,71 +418,58 @@ function CreateConnection({ onClose }: { onClose: (created?: Connection) => void
                 <option value="INTRADAY">Intraday</option>
               </select>
             </label>
-          ) : (
-            <>
-              <label className="field">
-                Environment
-                <select value={environment} onChange={(e) => setEnvironment(e.target.value)}>
-                  <option value="TESTNET">{oanda ? "Practice account (virtual money)" : "Testnet / paper"}</option>
-                  <option value="PRODUCTION">{oanda ? "Live account (real money)" : "Production (real money)"}</option>
-                </select>
-              </label>
-              {!oanda && (
-                <label className="field">
-                  Base currency
-                  <input value={baseCurrency} onChange={(e) => setBaseCurrency(e.target.value)} />
-                </label>
-              )}
-            </>
           )}
           <label className="field">
-            {fyers ? "App ID" : oanda ? "API token" : "API key"}{" "}
-            <span className="small muted">{fyers ? "(e.g. XA1234-100)" : oanda ? "(Manage API Access in your OANDA hub)" : "(optional for market data only)"}</span>
+            {spec.keyLabel} {spec.keyHint && <span className="small muted">({spec.keyHint})</span>}
             <input
-              required={fyers || oanda}
-              type={oanda ? "password" : "text"}
+              required={!spec.optionalKeys}
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               spellCheck={false}
               autoComplete="off"
+              type={venue === "OANDA" ? "password" : "text"}
             />
           </label>
-          <label className="field">
-            {fyers ? "Secret key" : oanda ? "Account ID" : "API secret"}
-            {oanda && <span className="small muted"> (e.g. 101-001-1234567-001)</span>}
-            <input
-              required={fyers || oanda}
-              type={oanda ? "text" : "password"}
-              value={apiSecret}
-              onChange={(e) => setApiSecret(e.target.value)}
-              autoComplete={oanda ? "off" : "new-password"}
-              spellCheck={false}
-            />
-          </label>
+          {spec.totp ? (
+            <>
+              <label className="field">
+                Client code
+                <input required value={clientCode} onChange={(e) => setClientCode(e.target.value)} spellCheck={false} />
+              </label>
+              <label className="field">
+                PIN
+                <input required type="password" inputMode="numeric" value={pin} onChange={(e) => setPin(e.target.value)} autoComplete="new-password" />
+              </label>
+              <label className="field">
+                TOTP secret <span className="small muted">(the key shown when you enabled TOTP)</span>
+                <input required type="password" value={totp} onChange={(e) => setTotp(e.target.value)} autoComplete="new-password" spellCheck={false} />
+              </label>
+            </>
+          ) : (
+            spec.secretLabel && (
+              <label className="field">
+                {spec.secretLabel}
+                <input
+                  required={!spec.optionalKeys}
+                  type={venue === "OANDA" ? "text" : "password"}
+                  value={apiSecret}
+                  onChange={(e) => setApiSecret(e.target.value)}
+                  autoComplete="new-password"
+                  spellCheck={false}
+                />
+              </label>
+            )
+          )}
         </div>
-        {fyers && (
-          <div className="alert">
-            Create an app at myapi.fyers.in (API dashboard), then sign in on the next step. Fyers has no test environment: the platform
-            uses your Fyers prices for paper trading, and only places real orders when you trade on this account or arm the autopilot.
-          </div>
-        )}
-        {oanda && (
-          <div className="alert warn small">
-            <strong>Indian residents:</strong> RBI rules allow forex trading only in INR pairs and EUR/USD, GBP/USD and USD/JPY on
-            recognised Indian exchanges; leveraged forex or gold trading with overseas brokers is not permitted under FEMA. A practice
-            account uses virtual money with live prices — use it to research and paper trade XAU/USD and forex. For real money, use
-            NSE currency futures or MCX gold through Fyers.
-          </div>
-        )}
-        {!fyers && environment === "PRODUCTION" && (
-          <div className="alert warn">
-            Orders sent through a production connection trade real funds. Risk limits and kill switches still apply.
-          </div>
+        <div className="alert small">{spec.help}</div>
+        {spec.warn && <div className="alert warn small">{spec.warn}</div>}
+        {environment === "PRODUCTION" && !spec.login && spec.environments && (
+          <div className="alert warn small">Orders through a live connection trade real money. Risk limits and kill switches still apply.</div>
         )}
         <div className="row end">
           <button type="button" onClick={() => onClose()}>Cancel</button>
           <button className="primary" type="submit" disabled={busy}>
-            {busy ? "Connecting…" : fyers ? "Save and continue" : "Add and test"}
+            {busy ? "Connecting…" : spec.login ? "Save and continue" : "Add and test"}
           </button>
         </div>
       </form>
@@ -457,23 +555,24 @@ function BrokerSignIn({ connection, onClose }: { connection: Connection; onClose
     });
   }, [connection.connection_id, run]);
   return (
-    <Dialog title={`Sign in to ${connection.venue === "FYERS" ? "Fyers" : connection.venue}`} onClose={onClose}>
+    <Dialog title={`Sign in to ${brokerName(connection.venue)}`} onClose={onClose}>
       {!login ? (
         <p className="muted">Preparing sign-in…</p>
       ) : (
         <div className="stack">
           <p style={{ margin: 0 }}>
-            In your Fyers app settings, the <strong>Redirect URL</strong> must be exactly:
+            In your {brokerName(connection.venue)} app settings, the <strong>Redirect URL</strong> must be exactly:
           </p>
           <code style={{ display: "block", padding: 8, background: "var(--surface-2)", borderRadius: 6, overflowWrap: "anywhere" }}>
             {login.redirect_uri}
           </code>
           <p className="small muted" style={{ margin: 0 }}>
-            You will sign in on fyers.in and come back here automatically. The link works once and expires in 15 minutes.
+            You will sign in on {brokerName(connection.venue)}&apos;s site and come back here automatically. The link works once and
+            expires in 15 minutes.
           </p>
           <div className="row end">
             <button type="button" onClick={onClose}>Cancel</button>
-            <a className="button primary" href={login.login_url}>Continue to Fyers</a>
+            <a className="button primary" href={login.login_url}>Continue to {brokerName(connection.venue)}</a>
           </div>
         </div>
       )}

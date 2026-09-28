@@ -160,12 +160,21 @@ def begin_login(
 
 
 @router.get(CALLBACK_PATH.removeprefix("/api/v1"), include_in_schema=False)
-def login_callback(request: Request, state: str = "", auth_code: str = "", s: str = "") -> RedirectResponse:
+def login_callback(
+    request: Request,
+    state: str = "",
+    auth_code: str = "",  # Fyers
+    request_token: str = "",  # Zerodha Kite
+    code: str = "",  # Upstox
+    s: str = "",
+    status: str = "",
+) -> RedirectResponse:
     """The broker redirects the browser here. The one-time `state` proves which login this completes;
     session cookies are not sent on this cross-site redirect, so they are not relied on."""
     c = ctx(request)
+    auth_code = auth_code or request_token or code
     try:
-        if s and s != "ok" or not auth_code:
+        if (s and s != "ok") or (status and status != "success") or not auth_code:
             raise PlatformError("LOGIN_FAILED", "the broker did not return an authorization code")
         with c.platform.lock:
             connection = _manager(request).complete_login(state, auth_code)

@@ -14,10 +14,15 @@ from typing import Any
 import httpx
 
 from jdquant.connectivity.alpaca import AlpacaAdapter
+from jdquant.connectivity.angelone import AngelOneAdapter
 from jdquant.connectivity.base import Environment, VenueAdapter, VenueError, VenueTimeout
 from jdquant.connectivity.binance import BinanceSpotAdapter
+from jdquant.connectivity.delta import DeltaAdapter
+from jdquant.connectivity.dhan import DhanAdapter
 from jdquant.connectivity.fyers import FyersAdapter
+from jdquant.connectivity.kite import KiteAdapter
 from jdquant.connectivity.oanda import OandaAdapter
+from jdquant.connectivity.upstox import UpstoxAdapter
 from jdquant.core.errors import NotFoundError, PlatformError, ValidationError
 from jdquant.marketdata.instruments import Instrument
 from jdquant.persistence.codec import decode, encode
@@ -33,6 +38,11 @@ ADAPTERS: dict[str, type[VenueAdapter]] = {
     "ALPACA": AlpacaAdapter,
     "FYERS": FyersAdapter,
     "OANDA": OandaAdapter,
+    "KITE": KiteAdapter,
+    "UPSTOX": UpstoxAdapter,
+    "ANGELONE": AngelOneAdapter,
+    "DHAN": DhanAdapter,
+    "DELTA": DeltaAdapter,
 }
 LOGIN_STATE_TTL = timedelta(minutes=15)
 
@@ -155,8 +165,11 @@ class ConnectionManager:
         """Re-attach persisted connections at startup; works offline using stored instruments."""
         for doc in self._store.all("connection"):
             connection = decode(Connection, doc)
-            for inst_doc in self._store.all(f"instrument:{connection.connection_id}"):
-                self._platform.instruments.add(decode(Instrument, inst_doc))
+            stored = [
+                decode(Instrument, d) for d in self._store.all(f"instrument:{connection.connection_id}")
+            ]
+            for instrument in stored:
+                self._platform.instruments.add(instrument)
             if connection.status is ConnectionStatus.DISABLED:
                 self.connections[connection.connection_id] = connection
                 continue
@@ -169,6 +182,8 @@ class ConnectionManager:
             except PlatformError:
                 log.exception("cannot restore connection %s", connection.connection_id)
                 continue
+            if hasattr(adapter, "remember"):
+                adapter.remember(stored)  # the broker's own references for each instrument
             if adapter.requires_login:
                 self._restore_session(connection, adapter)
             self._attach(connection, adapter)
@@ -245,7 +260,7 @@ class ConnectionManager:
     def _restore_session(self, connection: Connection, adapter: VenueAdapter) -> None:
         session = {
             part: self._secrets.get(self._secret_name(connection, part))
-            for part in ("access_token", "refresh_token", "pin")
+            for part in getattr(adapter, "session_parts", ("access_token", "refresh_token", "pin"))
             if self._secrets.exists(self._secret_name(connection, part))
         }
         adapter.set_session(session)
@@ -270,6 +285,10 @@ class ConnectionManager:
         if not connection.has_credentials:
             raise PlatformError("CONNECTION_PUBLIC", "a public connection has no credentials to rotate")
         candidate = self._build(connection, api_key, api_secret)
+        if hasattr(candidate, "remember"):
+            candidate.remember(
+                [decode(Instrument, d) for d in self._store.all(f"instrument:{connection.connection_id}")]
+            )
         self._verify(connection, candidate)
         self._secrets.put(self._secret_name(connection, "key"), api_key)
         self._secrets.put(self._secret_name(connection, "secret"), api_secret)
@@ -343,7 +362,7 @@ class ConnectionManager:
     def _build(self, connection: Connection, key: str | None, secret: str | None) -> VenueAdapter:
         http = self._http_factory(connection.venue) if self._http_factory else None
         options: dict[str, Any] = {}
-        if connection.venue == "FYERS":
+        if connection.venue == "FYERS" or getattr(ADAPTERS[connection.venue], "uses_product", False):
             from jdquant.markets.india import Product
 
             try:

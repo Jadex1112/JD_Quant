@@ -143,6 +143,8 @@ class CryptoExchangeFees(FeeSchedule):
 
 
 CRYPTO_FEES = CryptoExchangeFees()
+# Crypto perpetual futures (Delta Exchange India): the taker fee on notional plus 18% GST on the fee.
+CRYPTO_PERP_FEES = CryptoExchangeFees(rate=Decimal("0.0005"))
 
 
 def fees_for(instrument: Instrument, product: Product = Product.CNC) -> FeeSchedule:
@@ -155,6 +157,8 @@ def fees_for(instrument: Instrument, product: Product = Product.CNC) -> FeeSched
         return IndiaEquityFees(product=product)
     if instrument.venue == "BINANCE":
         return CRYPTO_FEES
+    if instrument.venue == "DELTA":
+        return CRYPTO_PERP_FEES
     if instrument.venue in FX_VENUES:
         from jdquant.markets.forex import FX_FEES
 
