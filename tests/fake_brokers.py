@@ -88,7 +88,7 @@ class FakeKite(_Book):
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         url = urlsplit(str(request.url))
-        path, query = url.path, dict(parse_qsl(url.query))
+        path = url.path
         form = dict(parse_qsl(request.content.decode())) if request.content else {}
         assert request.headers.get("X-Kite-Version") == "3"
         if path == "/session/token":
@@ -144,7 +144,14 @@ class FakeKite(_Book):
             )
             return httpx.Response(200, content=text.encode(), headers={"content-type": "text/csv"})
         if path == "/quote":
-            key = query["i"]
+            keys = [v for k, v in parse_qsl(url.query) if k == "i"]
+            key = keys[0]
+            if len(keys) > 1:
+                return _json(200, {"status": "success", "data": {
+                    k: {"last_price": 800.25, "volume": 150000, "net_change": 4.25,
+                        "ohlc": {"open": 796.0, "high": 802.0, "low": 795.0, "close": 796.0}}
+                    for k in keys
+                }})  # fmt: skip
             return _json(
                 200,
                 {
@@ -152,9 +159,21 @@ class FakeKite(_Book):
                     "data": {
                         key: {
                             "timestamp": "2026-01-05 14:29:59",
+                            "last_price": 800.25,
+                            "last_quantity": 5,
+                            "volume": 150000,
+                            "buy_quantity": 90000,
+                            "sell_quantity": 80000,
                             "depth": {
-                                "buy": [{"price": float(BID), "quantity": 10, "orders": 1}],
-                                "sell": [{"price": float(ASK), "quantity": 12, "orders": 1}],
+                                "buy": [
+                                    {"price": float(BID), "quantity": 10, "orders": 1},
+                                    {"price": float(BID) - 0.05, "quantity": 40, "orders": 3},
+                                    {"price": 0, "quantity": 0, "orders": 0},
+                                ],
+                                "sell": [
+                                    {"price": float(ASK), "quantity": 12, "orders": 1},
+                                    {"price": float(ASK) + 0.05, "quantity": 30, "orders": 2},
+                                ],
                             },
                         }
                     },
@@ -556,6 +575,45 @@ class FakeDhan(_Book):
             return _json(
                 200, {"dhanClientId": self.client_id, "availabelBalance": 100000.0, "utilizedAmount": 1000.0}
             )
+        if path == "/optionchain/expirylist":
+            assert body == {"UnderlyingScrip": 13, "UnderlyingSeg": "IDX_I"}
+            return _json(200, {"status": "success", "data": ["2026-01-08", "2026-01-15"]})
+        if path == "/optionchain":
+            oc = {}
+            for strike in range(26_000, 26_550, 50):
+                side = {}
+                for key, sign in (("ce", 1), ("pe", -1)):
+                    side[key] = {
+                        "last_price": 60.0 + max(0, sign * (26_240 - strike)),
+                        "oi": 1_000_000,
+                        "previous_oi": 900_000,
+                        "volume": 2_000_000,
+                        "implied_volatility": 12.5,
+                        "top_bid_price": 59.5,
+                        "top_ask_price": 60.5,
+                        "security_id": strike,
+                        "greeks": {"delta": 0.5 * sign, "gamma": 0.001, "theta": -8.0, "vega": 12.0},
+                    }
+                oc[f"{strike}.000000"] = side
+            return _json(200, {"status": "success", "data": {"last_price": 26_240.5, "oc": oc}})
+        if path == "/marketfeed/quote" and len(body["NSE_EQ"]) > 1:
+            return _json(
+                200,
+                {
+                    "status": "success",
+                    "data": {
+                        "NSE_EQ": {
+                            str(s): {
+                                "last_price": 800.25,
+                                "volume": 150000,
+                                "net_change": 4.25,
+                                "ohlc": {"open": 796.0, "close": 796.0, "high": 802.0, "low": 795.0},
+                            }
+                            for s in body["NSE_EQ"]
+                        }
+                    },
+                },
+            )
         if path == "/marketfeed/quote":
             sid = str(body["NSE_EQ"][0])
             return _json(
@@ -700,6 +758,15 @@ class FakeDelta:
                     },
                 ]
             )
+        if path.startswith("/v2/l2orderbook/"):
+            return ok(
+                {
+                    "symbol": path.rsplit("/", 1)[1],
+                    "last_updated_at": int(self.now.timestamp() * 1_000_000),
+                    "buy": [{"price": str(self.bid), "size": 120}, {"price": str(self.bid - 1), "size": 300}],
+                    "sell": [{"price": str(self.ask), "size": 80}, {"price": str(self.ask + 1), "size": 50}],
+                }
+            )
         if path.startswith("/v2/tickers/"):
             return ok(
                 {
@@ -765,3 +832,140 @@ class FakeDelta:
     def fill(self, client_order_id: str) -> None:
         order = self.orders[client_order_id]
         order.update(state="closed", unfilled_size=0, average_fill_price=order["limit_price"])
+
+
+# ---- Kotak Neo -------------------------------------------------------------------------------------------
+
+
+class FakeNeo(_Book):
+    key, mobile, ucc, mpin, totp_secret = (
+        "neo-consumer-key",
+        "+919876543210",
+        "UCC42",
+        "654321",
+        "JBSWY3DPEHPK3PXP",
+    )
+    STATUS = {"FILLED": "complete", "OPEN": "open", "CANCELLED": "cancelled"}
+
+    def __init__(self, now: datetime):
+        super().__init__()
+        self.now = now
+        self.logins = 0
+
+    def client(self):
+        return httpx.Client(transport=httpx.MockTransport(self.handle))
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        url = urlsplit(str(request.url))
+        path, host, h = url.path, url.hostname, request.headers
+        if host == "mis.kotaksecurities.com" and path == "/login/1.0/tradeApiLogin":
+            body = json.loads(request.content)
+            assert h["Authorization"] == self.key and h["neo-fin-key"] == "neotradeapi"
+            if body != {
+                "mobileNumber": self.mobile,
+                "ucc": self.ucc,
+                "totp": code_at(self.totp_secret, self.now),
+            }:
+                return _json(401, {"message": "Invalid TOTP"})
+            return _json(200, {"data": {"token": "view-token", "sid": "view-sid", "ucc": self.ucc}})
+        if host == "mis.kotaksecurities.com" and path == "/login/1.0/tradeApiValidate":
+            assert h["sid"] == "view-sid" and h["Auth"] == "view-token"
+            if json.loads(request.content) != {"mpin": self.mpin}:
+                return _json(401, {"message": "Invalid MPIN"})
+            self.logins += 1
+            return _json(
+                200,
+                {
+                    "data": {
+                        "token": "edit-token",
+                        "sid": "edit-sid",
+                        "ucc": self.ucc,
+                        "baseUrl": "https://cis.kotaksecurities.com",
+                        "feedUrl": "wss://sfeed.kotaksecurities.com/apifeed",
+                        "dataCenter": "E21",
+                    }
+                },
+            )
+        if host == "lapi.kotaksecurities.com":
+            text = (
+                "pSymbol,pGroup,pExchSeg,pInstType,pSymbolName,pTrdSymbol,dTickSize ,lLotSize\n"
+                "3045,EQ,nse_cm,,SBIN,SBIN-EQ,5,1\n"
+                "14428,EQ,nse_cm,,GOLDBEES,GOLDBEES-EQ,1,1\n"
+                "999,BE,nse_cm,,ODDCO,ODDCO-BE,5,1\n"
+            )
+            return httpx.Response(200, content=text.encode(), headers={"content-type": "text/csv"})
+        assert host == "cis.kotaksecurities.com", host
+        if path == "/script-details/1.0/masterscrip/file-paths":
+            assert h["Authorization"] == self.key
+            return _json(
+                200,
+                {
+                    "data": {
+                        "filesPaths": [
+                            "https://lapi.kotaksecurities.com/masterscrip/bse_cm.csv",
+                            "https://lapi.kotaksecurities.com/masterscrip/nse_cm-v1.csv",
+                        ]
+                    }
+                },
+            )
+        if path.startswith("/script-details/1.0/quotes/neosymbol/"):
+            tokens = [pair.split("|")[1] for pair in path.split("/")[-2].split(",")]
+            return _json(
+                200,
+                [
+                    {
+                        "exchange_token": token,
+                        "ltp": "800.20",
+                        "last_volume": "150000",
+                        "last_traded_quantity": "5",
+                        "ohlc": {"open": "795.00", "high": "802.00", "low": "794.00", "close": "796.00"},
+                        "depth": {
+                            "buy": [{"price": str(BID), "quantity": "10", "orders": "1"}],
+                            "sell": [{"price": str(ASK), "quantity": "12", "orders": "2"}],
+                        },
+                    }
+                    for token in tokens
+                ],
+            )
+        assert h["Sid"] == "edit-sid" and h["Auth"] == "edit-token"
+        form = json.loads(dict(parse_qsl(request.content.decode()))["jData"]) if request.content else {}
+        if path == "/quick/order/rule/ms/place":
+            assert h["Authorization"] == self.key and form["os"] == "NEOTRADEAPI" and form["am"] == "NO"
+            oid = self.place(
+                symbol=form["ts"],
+                side="BUY" if form["tt"] == "B" else "SELL",
+                qty=int(form["qt"]),
+                market=form["pt"] == "MKT",
+                price=float(form["pr"]),
+                tag=form["ig"],
+            )
+            self.orders[oid]["product"] = form["pc"]
+            return _json(200, {"nOrdNo": oid, "stat": "Ok", "stCode": 200})
+        if path == "/quick/order/cancel":
+            ok = self.cancel(form["on"])
+            return _json(
+                200 if ok else 400, {"stat": "Ok" if ok else "Not_Ok", "stCode": 200 if ok else 1021}
+            )
+        if path == "/quick/user/orders":
+            return _json(
+                200,
+                {
+                    "stat": "Ok",
+                    "data": [
+                        {
+                            "nOrdNo": o["id"],
+                            "ordSt": self.STATUS[o["status"]],
+                            "fldQty": o["filled"],
+                            "avgPrc": str(o["avg"]),
+                            "GuiOrdId": o["tag"],
+                            "rejRsn": "--",
+                            "hsUpTm": "2026/01/05 14:30:01",
+                        }
+                        for o in self.orders.values()
+                    ],
+                },
+            )
+        if path == "/quick/user/limits":
+            return _json(200, {"stat": "Ok", "Net": "100000", "MarginUsed": "0"})
+        return _json(404, {"stat": "Not_Ok", "errMsg": f"no route {path}"})

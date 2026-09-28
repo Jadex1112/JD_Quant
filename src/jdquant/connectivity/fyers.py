@@ -35,6 +35,7 @@ from jdquant.connectivity.base import (
 from jdquant.core.clock import Clock
 from jdquant.core.errors import PlatformError
 from jdquant.core.types import Side
+from jdquant.marketdata.book import levels
 from jdquant.marketdata.instruments import AssetClass, Instrument, InstrumentStatus
 from jdquant.marketdata.records import Candle, Quote
 from jdquant.markets.india import IST, IndiaEquityFees, Product, fees_for
@@ -52,10 +53,27 @@ FUTURE_TICKER = re.compile(
 )
 FUTURES_HORIZON = timedelta(days=120)  # load the front contracts only
 
+FYERS_INDEX_SYMBOLS = {
+    "NIFTY": "NSE:NIFTY50-INDEX",
+    "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
+    "FINNIFTY": "NSE:FINNIFTY-INDEX",
+    "MIDCPNIFTY": "NSE:MIDCPNIFTY-INDEX",
+    "SENSEX": "BSE:SENSEX-INDEX",
+}
 RESOLUTIONS = {
-    60: "1", 120: "2", 180: "3", 300: "5", 600: "10", 900: "15", 1200: "20",
-    1800: "30", 3600: "60", 7200: "120", 14400: "240", 86400: "D",
-}  # fmt: skip
+    60: "1",
+    120: "2",
+    180: "3",
+    300: "5",
+    600: "10",
+    900: "15",
+    1200: "20",
+    1800: "30",
+    3600: "60",
+    7200: "120",
+    14400: "240",
+    86400: "D",
+}
 ORDER_TYPES = {OrderType.LIMIT: 1, OrderType.MARKET: 2, OrderType.STOP_MARKET: 3, OrderType.STOP_LIMIT: 4}
 VALIDITY = {TimeInForce.DAY: "DAY", TimeInForce.GTC: "DAY", TimeInForce.IOC: "IOC"}
 # Order book status codes.
@@ -388,6 +406,110 @@ class FyersAdapter(VenueAdapter):
             return Quote(instrument.instrument_id, at, bid, Decimal(0), ask, Decimal(0))
         return None
 
+    def option_underlyings(self) -> tuple[str, ...]:
+        return tuple(FYERS_INDEX_SYMBOLS)
+
+    def fetch_option_chain(self, underlying: str, expiry=None):
+        """Chain from /data/options-chain-v3: calls, puts, open interest and its change, bid/ask, volume."""
+        from jdquant.intelligence.options import OptionChain, OptionRow
+
+        symbol = FYERS_INDEX_SYMBOLS.get(underlying.upper(), f"NSE:{underlying.upper()}-EQ")
+        params: dict[str, Any] = {"symbol": symbol, "strikecount": 15}
+        expiries = self._chain_expiries(symbol)
+        if expiry is not None:
+            stamp = next((ts for d, ts in expiries if d == expiry), None)
+            if stamp is not None:
+                params["timestamp"] = stamp
+        body = self._request("GET", f"{DATA}/options-chain-v3", params=params)
+        data = body.get("data") or {}
+        rows, spot = [], None
+        for item in data.get("optionsChain") or []:
+            kind = str(item.get("option_type") or "")
+            if kind not in ("CE", "PE"):
+                spot = spot or item.get("ltp")
+                continue
+
+            def num(key, item=item):
+                v = item.get(key)
+                return None if v in (None, "") else float(v)
+
+            rows.append(
+                OptionRow(
+                    float(item["strike_price"]),
+                    kind,
+                    num("ltp"),
+                    num("bid"),
+                    num("ask"),
+                    num("oi"),
+                    num("oich"),
+                    num("volume"),
+                    symbol=str(item.get("symbol") or ""),
+                )
+            )
+        if not rows or not spot:
+            return None
+        listed = [d for d, _ in expiries] or []
+        chosen = expiry or (listed[0] if listed else self._clock.now().date())
+        return OptionChain(
+            underlying.upper(), chosen, float(spot), self._clock.now(), rows, self.venue, listed
+        )
+
+    def _chain_expiries(self, symbol: str) -> list[tuple]:
+        body = self._request("GET", f"{DATA}/options-chain-v3", params={"symbol": symbol, "strikecount": 1})
+        out = []
+        for e in (body.get("data") or {}).get("expiryData") or []:
+            try:
+                day = datetime.strptime(str(e["date"]), "%d-%m-%Y").date()
+            except (KeyError, ValueError):
+                continue
+            out.append((day, e.get("expiry")))
+        return sorted(out)
+
+    def fetch_snapshots(self, instruments: list[Instrument]) -> dict[str, dict[str, Any]]:
+        from jdquant.connectivity.india_broker import chunks, day_stats
+
+        out: dict[str, dict[str, Any]] = {}
+        for batch in chunks(instruments, 50):
+            body = self._request(
+                "GET", f"{DATA}/quotes", params={"symbols": ",".join(i.instrument_id for i in batch)}
+            )
+            for item in body.get("d") or []:
+                v = item.get("v") or {}
+                if item.get("s") != "ok":
+                    continue
+                stats = day_stats(
+                    v.get("lp"),
+                    v.get("open_price"),
+                    v.get("high_price"),
+                    v.get("low_price"),
+                    v.get("prev_close_price"),
+                    v.get("volume"),
+                    v.get("ch"),
+                )
+                if stats is not None:
+                    out[item.get("n") or v.get("symbol")] = stats
+        return out
+
+    def fetch_depth(self, instrument: Instrument):
+        """Five levels each side with order counts, plus the last trade, volume and open interest."""
+        body = self._request(
+            "GET", f"{DATA}/depth", params={"symbol": instrument.instrument_id, "ohlcv_flag": 1}
+        )
+        item = (body.get("d") or {}).get(instrument.instrument_id) or {}
+        ltt = item.get("ltt")
+        return self.book(
+            instrument,
+            bids=levels(item.get("bids"), bid=True, qty_key="volume", orders_key="ord"),
+            asks=levels(item.get("ask"), bid=False, qty_key="volume", orders_key="ord"),
+            at=datetime.fromtimestamp(int(ltt), UTC) if ltt else None,
+            last_price=item.get("ltp"),
+            last_quantity=item.get("ltq"),
+            volume=item.get("v"),
+            open_interest=item.get("oi"),
+            total_buy_quantity=item.get("totalbuyqty"),
+            total_sell_quantity=item.get("totalsellqty"),
+        )
+
     def fetch_candles(self, instrument: Instrument, interval_seconds: int, limit: int) -> list[Candle]:
         resolution = RESOLUTIONS.get(interval_seconds)
         if resolution is None:
@@ -426,9 +548,18 @@ class FyersAdapter(VenueAdapter):
             if close_ts > now:
                 continue  # the current bar is still forming
             candles.append(
-                Candle(instrument.instrument_id, interval_seconds, open_ts, close_ts,
-                       _d(o), _d(h), _d(low), _d(c), _d(v or 0))
-            )  # fmt: skip
+                Candle(
+                    instrument.instrument_id,
+                    interval_seconds,
+                    open_ts,
+                    close_ts,
+                    _d(o),
+                    _d(h),
+                    _d(low),
+                    _d(c),
+                    _d(v or 0),
+                )
+            )
         return candles[-limit:]
 
     # ---- trading ------------------------------------------------------------------------------

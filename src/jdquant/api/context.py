@@ -17,8 +17,11 @@ from jdquant.autopilot.engine import Autopilot
 from jdquant.autopilot.lab import StrategyLab
 from jdquant.autopilot.monitor import TradeMonitor
 from jdquant.connectivity.connections import ConnectionManager, HttpFactory
+from jdquant.connectivity.feeds.manager import FeedManager
 from jdquant.connectivity.poller import VenuePoller
+from jdquant.intelligence.service import MarketIntelligence
 from jdquant.marketdata.live import LiveMarket, SimulatedFeed
+from jdquant.marketdata.recorder import MarketStore
 from jdquant.persistence.store import Store
 from jdquant.platform import Platform, build_paper_platform
 from jdquant.security.audit import AuditLog
@@ -118,12 +121,14 @@ def build_context(
         "live": live,
     }
     if settings.demo_feed:
-        feed = SimulatedFeed(
-            platform,
-            poller.on_quote,
-            has_source=lambda instrument_id: connections.data_source_for(instrument_id) is not None,
-            live=live,
-        )
+
+        def has_source(instrument_id: str) -> bool:
+            intelligence = services.get("intelligence")
+            return connections.data_source_for(instrument_id) is not None or bool(
+                intelligence and intelligence.simulated_covers(instrument_id)
+            )
+
+        feed = SimulatedFeed(platform, poller.on_quote, has_source=has_source, live=live)
         feed.backfill(live)
         services["demo_feed"] = feed
     context = AppContext(platform, store, audit, identity, SecretStore(store, box), settings, services)
@@ -146,6 +151,25 @@ def build_context(
     monitor = TradeMonitor(services["autopilot"], chat, data_source=connections.data_source_for, live=live)
     services["monitor"] = monitor
     services["lab"] = StrategyLab(platform, store, services["autopilot"], chat, runner)
+    market_store = (
+        MarketStore(settings.data_dir / "market.db") if settings.data_dir else MarketStore(":memory:")
+    )
+    intelligence = MarketIntelligence(
+        platform,
+        store,
+        market_store,
+        connections=connections,
+        live=live,
+        chat=chat,
+        forward_quote=poller.on_quote,
+        simulated_depth=settings.demo_feed,
+    )
+    services["intelligence"] = intelligence
+    intelligence.feeds = FeedManager(connections, intelligence.hub, platform.clock)
+    poller.hub = intelligence.hub
+    poller.depth_watched = intelligence.depth_watched
+    poller.streamed = intelligence.streamed
+    poller.latency = intelligence.record_rest
     runner.entry_gate = monitor.gate
     for hosted in runner.hosted.values():  # deployments resumed before the monitor existed
         hosted.host.ctx.entry_gate = monitor.gate

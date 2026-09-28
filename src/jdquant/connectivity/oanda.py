@@ -28,6 +28,7 @@ from jdquant.connectivity.base import (
     VenueTimeout,
 )
 from jdquant.core.clock import Clock
+from jdquant.marketdata.book import levels
 from jdquant.marketdata.instruments import AssetClass, Instrument
 from jdquant.marketdata.records import Candle, Quote
 from jdquant.oms.orders import Order, OrderStatus, OrderType, ReportType, TimeInForce
@@ -194,6 +195,19 @@ class OandaAdapter(VenueAdapter):
             _d(bid.get("liquidity", 0)),
             _d(ask["price"]),
             _d(ask.get("liquidity", 0)),
+        )
+
+    def fetch_depth(self, instrument: Instrument):
+        """OANDA quotes several prices per side, each good for a stated liquidity (units)."""
+        _, data = self._request(
+            "GET", self._account_path("/pricing"), params={"instruments": instrument.symbol}
+        )
+        price = (data.get("prices") or [{}])[0]
+        return self.book(
+            instrument,
+            bids=levels(price.get("bids"), bid=True, qty_key="liquidity"),
+            asks=levels(price.get("asks"), bid=False, qty_key="liquidity"),
+            at=_ts(price["time"]) if price.get("time") else None,
         )
 
     def fetch_candles(self, instrument: Instrument, interval_seconds: int, limit: int) -> list[Candle]:

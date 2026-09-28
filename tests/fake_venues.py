@@ -136,6 +136,17 @@ class FakeBinance:
                     ]
                 },
             )
+        if route == ("GET", "/api/v3/depth"):
+            bid, ask = self.book[params["symbol"]]
+            step = Decimal("0.01")
+            return _json(
+                200,
+                {
+                    "lastUpdateId": 1,
+                    "bids": [[str(bid - k * step), str(1 + k)] for k in range(3)],
+                    "asks": [[str(ask + k * step), str(2 + k)] for k in range(3)],
+                },
+            )
         if route == ("GET", "/api/v3/ticker/bookTicker"):
             bid, ask = self.book[params["symbol"]]
             return _json(
@@ -504,9 +515,72 @@ class FakeFyers:
                             "ask": float(ask),
                             "lp": float(ask),
                             "tt": int(self.now.timestamp()),
+                            "open_price": float(bid) - 5,
+                            "high_price": float(ask) + 3,
+                            "low_price": float(bid) - 8,
+                            "prev_close_price": float(bid) - 10,
+                            "volume": 250_000,
+                            "ch": 10.2,
                         }
                         d.append({"n": sym, "s": "ok", "v": v})
                 return _json(200, {"s": "ok", "d": d})
+            case ("GET", "/data/options-chain-v3"):
+                assert params["symbol"] == "NSE:NIFTY50-INDEX"
+                expiry = {"date": "08-01-2026", "expiry": "1767866400"}
+                rows = [
+                    {"option_type": "", "strike_price": -1, "ltp": 26_240.5, "symbol": "NSE:NIFTY50-INDEX"}
+                ]
+                for strike in range(26_000, 26_550, 50):
+                    for kind in ("CE", "PE"):
+                        itm = (26_240 - strike) if kind == "CE" else (strike - 26_240)
+                        price = max(itm, 0) + 60.0
+                        rows.append(
+                            {
+                                "option_type": kind,
+                                "strike_price": strike,
+                                "ltp": price,
+                                "bid": price - 0.5,
+                                "ask": price + 0.5,
+                                "oi": 1_000_000 + (strike - 26_000) * (400 if kind == "CE" else -300),
+                                "oich": 50_000,
+                                "volume": 2_000_000,
+                                "symbol": f"NSE:NIFTY26108{strike}{kind}",
+                            }
+                        )
+                return _json(
+                    200,
+                    {
+                        "s": "ok",
+                        "code": 200,
+                        "data": {
+                            "callOi": 1,
+                            "putOi": 1,
+                            "expiryData": [expiry],
+                            "optionsChain": rows if int(params.get("strikecount", 15)) > 1 else rows[:1],
+                        },
+                    },
+                )
+            case ("GET", "/data/depth"):
+                sym = params["symbol"]
+                bid, ask = self.quotes[sym]
+                item = {
+                    "totalbuyqty": 5000,
+                    "totalsellqty": 4000,
+                    "bids": [
+                        {"price": float(bid), "volume": 300, "ord": 4},
+                        {"price": float(bid) - 0.05, "volume": 150, "ord": 2},
+                    ],
+                    "ask": [
+                        {"price": float(ask), "volume": 200, "ord": 3},
+                        {"price": float(ask) + 0.05, "volume": 100, "ord": 1},
+                    ],
+                    "ltp": float(ask),
+                    "ltq": 10,
+                    "ltt": int(self.now.timestamp()),
+                    "v": 123456,
+                    "oi": 0,
+                }
+                return _json(200, {"s": "ok", "d": {sym: item}, "message": ""})
             case ("GET", "/data/history"):
                 step = 86400 if params["resolution"] == "D" else int(params["resolution"]) * 60
                 start, end = int(params["range_from"]), int(params["range_to"])

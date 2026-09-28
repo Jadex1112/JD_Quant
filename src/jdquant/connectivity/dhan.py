@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import csv
 import io
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import httpx
 
@@ -18,13 +18,16 @@ from jdquant.connectivity.fyers import token_expiry
 from jdquant.connectivity.india_broker import (
     BookEntry,
     IndianCashBroker,
+    chunks,
     d,
+    day_stats,
     ist_time,
     nse_equity,
     tick_in_rupees,
 )
 from jdquant.core.clock import Clock
 from jdquant.core.types import Side
+from jdquant.marketdata.book import levels
 from jdquant.marketdata.instruments import Instrument
 from jdquant.marketdata.records import Quote
 from jdquant.markets.india import IST, Product
@@ -34,6 +37,7 @@ API = "https://api.dhan.co/v2"
 SCRIP_MASTER = "https://images.dhan.co/api-data/api-scrip-master.csv"
 INTERVALS = {60: "1", 300: "5", 900: "15", 1500: "25", 3600: "60", 86400: "D"}
 CHUNK_DAYS = {60: 85, 300: 85, 900: 85, 1500: 85, 3600: 85, 86400: 3000}
+DHAN_INDICES = {"NIFTY": 13, "BANKNIFTY": 25, "FINNIFTY": 27, "MIDCPNIFTY": 442}  # IDX_I security ids
 STATUS = {
     "TRADED": "FILLED",
     "REJECTED": "REJECTED",
@@ -144,10 +148,108 @@ class DhanAdapter(IndianCashBroker):
             )
         return out
 
-    def fetch_quote(self, instrument: Instrument) -> Quote | None:
+    def _quote_item(self, instrument: Instrument) -> dict:
         security_id = self.ref(instrument.instrument_id)
         body = self._call("POST", "/marketfeed/quote", {"NSE_EQ": [int(security_id)]}) or {}
-        item = ((body.get("data") or {}).get("NSE_EQ") or {}).get(security_id) or {}
+        return ((body.get("data") or {}).get("NSE_EQ") or {}).get(security_id) or {}
+
+    def option_underlyings(self) -> tuple[str, ...]:
+        return tuple(DHAN_INDICES)
+
+    def fetch_option_chain(self, underlying: str, expiry=None):
+        """Index option chain from /optionchain, with Dhan's own IV and Greeks (Dhan allows 1 call / 3 s)."""
+        from jdquant.intelligence.options import OptionChain, OptionRow
+
+        index = DHAN_INDICES.get(underlying.upper())
+        if index is None:
+            raise VenueError(
+                "UNDERLYING_UNSUPPORTED", f"Dhan option chains here cover {', '.join(DHAN_INDICES)}"
+            )
+        base = {"UnderlyingScrip": index, "UnderlyingSeg": "IDX_I"}
+        listed = sorted(
+            date.fromisoformat(d)
+            for d in (self._call("POST", "/optionchain/expirylist", base) or {}).get("data") or []
+        )
+        chosen = expiry or (listed[0] if listed else None)
+        if chosen is None:
+            return None
+        data = (self._call("POST", "/optionchain", {**base, "Expiry": chosen.isoformat()}) or {}).get(
+            "data"
+        ) or {}
+        rows = []
+        for strike, sides in (data.get("oc") or {}).items():
+            for kind, key in (("CE", "ce"), ("PE", "pe")):
+                item = (sides or {}).get(key)
+                if not item:
+                    continue
+                g = item.get("greeks") or {}
+                oi, prev = item.get("oi"), item.get("previous_oi")
+                iv = item.get("implied_volatility")
+                rows.append(
+                    OptionRow(
+                        float(strike),
+                        kind,
+                        item.get("last_price"),
+                        item.get("top_bid_price"),
+                        item.get("top_ask_price"),
+                        oi,
+                        (oi - prev) if oi is not None and prev is not None else None,
+                        item.get("volume"),
+                        float(iv) / 100 if iv else None,
+                        g.get("delta"),
+                        g.get("gamma"),
+                        g.get("theta"),
+                        g.get("vega"),
+                        symbol=str(item.get("security_id") or ""),
+                    )
+                )
+        spot = data.get("last_price")
+        if not rows or not spot:
+            return None
+        return OptionChain(
+            underlying.upper(), chosen, float(spot), self._clock.now(), rows, self.venue, listed
+        )
+
+    def fetch_snapshots(self, instruments: list[Instrument]) -> dict[str, dict]:
+        out = {}
+        for batch in chunks(instruments, 1000):
+            ids = {self.ref(i.instrument_id): i.instrument_id for i in batch if self.has_ref(i)}
+            if not ids:
+                continue
+            body = self._call("POST", "/marketfeed/quote", {"NSE_EQ": [int(s) for s in ids]}) or {}
+            for sid, item in ((body.get("data") or {}).get("NSE_EQ") or {}).items():
+                ohlc = item.get("ohlc") or {}
+                stats = day_stats(
+                    item.get("last_price"),
+                    ohlc.get("open"),
+                    ohlc.get("high"),
+                    ohlc.get("low"),
+                    ohlc.get("close"),
+                    item.get("volume"),
+                    item.get("net_change"),
+                )
+                if stats is not None and str(sid) in ids:
+                    out[ids[str(sid)]] = stats
+        return out
+
+    def fetch_depth(self, instrument: Instrument):
+        item = self._quote_item(instrument)
+        depth = item.get("depth") or {}
+        return self.book(
+            instrument,
+            bids=levels(depth.get("buy"), bid=True),
+            asks=levels(depth.get("sell"), bid=False),
+            at=ist_time(item.get("last_trade_time")),
+            last_price=item.get("last_price"),
+            last_quantity=item.get("last_quantity"),
+            volume=item.get("volume"),
+            open_interest=item.get("oi"),
+            total_buy_quantity=item.get("buy_quantity"),
+            total_sell_quantity=item.get("sell_quantity"),
+        )
+
+    def fetch_quote(self, instrument: Instrument) -> Quote | None:
+        item = self._quote_item(instrument)
         depth = item.get("depth") or {}
         buys, sells = depth.get("buy") or [], depth.get("sell") or []
         if not buys or not sells or not buys[0].get("price") or not sells[0].get("price"):

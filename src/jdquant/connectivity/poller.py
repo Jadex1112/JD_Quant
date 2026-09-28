@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 
 from jdquant.connectivity.base import VenueError, VenueTimeout
 from jdquant.connectivity.connections import ConnectionManager
@@ -29,6 +30,10 @@ class VenuePoller:
         self._runner = runner
         self.interval = interval
         self.watched = None  # callable returning instruments open on charts
+        self.hub = None  # MarketDataHub: order-book snapshots for instruments under depth watch
+        self.depth_watched = None  # callable: instruments whose order book is analysed
+        self.streamed = None  # callable(instrument_id) -> True when a live WebSocket feed covers it
+        self.latency = None  # callable(source, milliseconds) for broker REST response times
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -76,18 +81,37 @@ class VenuePoller:
             except (VenueError, VenueTimeout) as exc:
                 self._connections.mark(connection_id, False, str(exc))
 
-        for instrument_id in sorted(wanted):
+        depth = set(self.depth_watched()) if self.depth_watched is not None else set()
+        for instrument_id in sorted(wanted | depth):
+            if self.streamed is not None and self.streamed(instrument_id):
+                continue  # prices arrive over the broker's WebSocket
             source = self._connections.data_source_for(instrument_id)
             if source is None:
                 continue
             try:
-                quote = source.fetch_quote(p.instruments.get(instrument_id))
+                instrument = p.instruments.get(instrument_id)
+                started = time.monotonic()
+                if instrument_id in depth and self.hub is not None:
+                    book = source.fetch_depth(instrument)
+                    self._timed(source.venue, started)
+                    if book is not None:
+                        self.hub.publish(book)  # the hub forwards its top of book to on_quote
+                        continue
+                    started = time.monotonic()
+                quote = source.fetch_quote(instrument)
+                self._timed(source.venue, started)
             except Exception as exc:  # a bad symbol must not stop the loop
-                log.warning("quote fetch failed for %s: %s", instrument_id, exc)
+                log.warning("price fetch failed for %s: %s", instrument_id, exc)
+                if self.hub is not None:
+                    self.hub.record_error(source.venue, f"{instrument_id}: {exc}")
                 continue
             if quote is not None:
                 self.on_quote(quote)
         self._runner.tick()
+
+    def _timed(self, venue: str, started: float) -> None:
+        if self.latency is not None:
+            self.latency(venue, (time.monotonic() - started) * 1000)
 
     def refresh_quote(self, instrument_id: str) -> None:
         """Fetch a price on demand when the cached one is missing or stale (e.g. before an order)."""

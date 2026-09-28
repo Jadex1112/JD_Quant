@@ -17,6 +17,7 @@ import httpx
 
 from jdquant.core.clock import Clock
 from jdquant.core.errors import PlatformError
+from jdquant.marketdata.book import BookSnapshot
 from jdquant.marketdata.instruments import Instrument
 from jdquant.marketdata.records import Candle, Quote
 from jdquant.oms.orders import ExecutionReport, Liquidity, Order, ReportType
@@ -194,6 +195,44 @@ class VenueAdapter(ABC):
     def is_ready(self) -> bool:
         """False while the adapter cannot make authenticated calls (e.g. awaiting a broker login)."""
         return True
+
+    def fetch_depth(self, instrument: Instrument) -> BookSnapshot | None:
+        """The visible order book over REST, where the venue publishes one (None otherwise)."""
+        return None
+
+    def option_underlyings(self) -> tuple[str, ...]:
+        """Underlyings whose option chains this venue can supply (e.g. NIFTY); empty when none."""
+        return ()
+
+    def fetch_option_chain(self, underlying: str, expiry=None):
+        """The `intelligence.options.OptionChain` for an underlying, nearest expiry by default."""
+        return None
+
+    def fetch_snapshots(self, instruments: list[Instrument]) -> dict[str, dict[str, Any]]:
+        """Day statistics for many instruments at once: last, open, high, low, previous close, volume.
+
+        The default asks for one quote at a time (so only a few instruments); brokers with a batch
+        quote endpoint override it.
+        """
+        out: dict[str, dict[str, Any]] = {}
+        for instrument in instruments[:20]:
+            quote = self.fetch_quote(instrument)
+            if quote is not None:
+                out[instrument.instrument_id] = {"last": float(quote.mid)}
+        return out
+
+    def book(self, instrument: Instrument, *, bids, asks, at: datetime | None, capacity: int = 5, **fields):
+        """A normalized snapshot stamped with this venue as its source; numbers may be str/Decimal/None."""
+        now = self._clock.now()
+        values = {}
+        for key, value in fields.items():
+            try:
+                values[key] = None if value in (None, "") else float(value)
+            except (TypeError, ValueError):
+                values[key] = None
+        return BookSnapshot(
+            instrument.instrument_id, self.venue, at or now, now, bids, asks, capacity=capacity, **values
+        )
 
     def replace(self, order: Order, quantity: Decimal, limit_price: Decimal) -> None:
         raise VenueError("REPLACE_UNSUPPORTED", f"{self.venue} does not support native replace")

@@ -17,13 +17,16 @@ from jdquant.connectivity.base import Balance, ConnectionTest, Environment, Toke
 from jdquant.connectivity.india_broker import (
     BookEntry,
     IndianCashBroker,
+    chunks,
     d,
+    day_stats,
     ist_time,
     nse_equity,
     tick_in_rupees,
 )
 from jdquant.core.clock import Clock
 from jdquant.core.types import Side
+from jdquant.marketdata.book import levels
 from jdquant.marketdata.instruments import Instrument
 from jdquant.marketdata.records import Quote
 from jdquant.markets.india import IST, Product
@@ -196,12 +199,56 @@ class AngelOneAdapter(IndianCashBroker):
             )
         return out
 
-    def fetch_quote(self, instrument: Instrument) -> Quote | None:
+    def _quote_item(self, instrument: Instrument) -> dict:
         token = self.ref(instrument.instrument_id).split("|")[1]
         data = (
             self._call(f"{BASE}/market/v1/quote", {"mode": "FULL", "exchangeTokens": {"NSE": [token]}}) or {}
         )
-        item = next(iter(data.get("fetched") or []), {})
+        return next(iter(data.get("fetched") or []), {})
+
+    def fetch_snapshots(self, instruments: list[Instrument]) -> dict[str, dict]:
+        out = {}
+        for batch in chunks(instruments, 50):
+            tokens = {
+                self.ref(i.instrument_id).split("|")[1]: i.instrument_id for i in batch if self.has_ref(i)
+            }
+            if not tokens:
+                continue
+            data = self._call(
+                f"{BASE}/market/v1/quote", {"mode": "FULL", "exchangeTokens": {"NSE": list(tokens)}}
+            )
+            for item in (data or {}).get("fetched") or []:
+                stats = day_stats(
+                    item.get("ltp"),
+                    item.get("open"),
+                    item.get("high"),
+                    item.get("low"),
+                    item.get("close"),
+                    item.get("tradeVolume"),
+                    item.get("netChange"),
+                )
+                if stats is not None and item.get("symbolToken") in tokens:
+                    out[tokens[item["symbolToken"]]] = stats
+        return out
+
+    def fetch_depth(self, instrument: Instrument):
+        item = self._quote_item(instrument)
+        depth = item.get("depth") or {}
+        return self.book(
+            instrument,
+            bids=levels(depth.get("buy"), bid=True),
+            asks=levels(depth.get("sell"), bid=False),
+            at=ist_time(item.get("exchFeedTime")),
+            last_price=item.get("ltp"),
+            last_quantity=item.get("lastTradeQty"),
+            volume=item.get("tradeVolume"),
+            open_interest=item.get("opnInterest"),
+            total_buy_quantity=item.get("totBuyQuan"),
+            total_sell_quantity=item.get("totSellQuan"),
+        )
+
+    def fetch_quote(self, instrument: Instrument) -> Quote | None:
+        item = self._quote_item(instrument)
         depth = item.get("depth") or {}
         buys, sells = depth.get("buy") or [], depth.get("sell") or []
         if not buys or not sells or not buys[0].get("price") or not sells[0].get("price"):

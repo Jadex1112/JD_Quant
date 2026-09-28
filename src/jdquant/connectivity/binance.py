@@ -23,6 +23,7 @@ from jdquant.connectivity.base import (
     VenueTimeout,
 )
 from jdquant.core.clock import Clock
+from jdquant.marketdata.book import levels
 from jdquant.marketdata.instruments import AssetClass, Instrument, InstrumentStatus
 from jdquant.marketdata.records import Candle, Quote
 from jdquant.oms.orders import Order, OrderStatus, OrderType, ReportType, TimeInForce
@@ -216,6 +217,20 @@ class BinanceSpotAdapter(VenueAdapter):
             _d(t["bidQty"]),
             _d(t["askPrice"]),
             _d(t["askQty"]),
+        )
+
+    def fetch_depth(self, instrument: Instrument):
+        book = self._request("GET", "/api/v3/depth", {"symbol": instrument.symbol, "limit": 20}, weight=5)
+
+        def rows(side):
+            return [{"price": p, "quantity": q} for p, q, *_ in book.get(side) or []]
+
+        return self.book(
+            instrument,
+            bids=levels(rows("bids"), bid=True),
+            asks=levels(rows("asks"), bid=False),
+            at=None,
+            capacity=20,
         )
 
     def fetch_candles(self, instrument: Instrument, interval_seconds: int, limit: int) -> list[Candle]:

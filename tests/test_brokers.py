@@ -7,7 +7,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 import pytest
 from conftest import T0
-from fake_brokers import ASK, BID, FakeAngel, FakeDelta, FakeDhan, FakeKite, FakeUpstox, dhan_token
+from fake_brokers import ASK, BID, FakeAngel, FakeDelta, FakeDhan, FakeKite, FakeNeo, FakeUpstox, dhan_token
 
 from jdquant.connectivity.base import Environment
 from jdquant.connectivity.connections import ConnectionManager, ConnectionStatus
@@ -41,10 +41,13 @@ def _credentials(venue, fake):
     if venue == "ANGELONE":
         secret = {"client_code": fake.client_code, "pin": fake.pin, "totp_secret": fake.totp_secret}
         return fake.key, json.dumps(secret)
+    if venue == "KOTAKNEO":
+        secret = {"mobile": fake.mobile, "ucc": fake.ucc, "mpin": fake.mpin, "totp_secret": fake.totp_secret}
+        return fake.key, json.dumps(secret)
     return fake.client_id, fake.token  # DHAN
 
 
-FAKES = {"KITE": FakeKite, "UPSTOX": FakeUpstox, "ANGELONE": FakeAngel, "DHAN": FakeDhan}
+FAKES = {"KITE": FakeKite, "UPSTOX": FakeUpstox, "ANGELONE": FakeAngel, "DHAN": FakeDhan, "KOTAKNEO": FakeNeo}
 INDIAN = list(FAKES)
 
 
@@ -135,12 +138,16 @@ def test_product_follows_the_connection(venue):
     platform, _, conn, fake = _setup(venue, product="INTRADAY")
     _order(platform, conn)
     sent = next(r for r in reversed(fake.requests) if r.method == "POST" and "order" in r.url.path.lower())
-    body = dict(parse_qsl(sent.content.decode())) if venue == "KITE" else json.loads(sent.content)
-    product = body.get("product") or body.get("producttype") or body.get("productType")
-    assert product == {"KITE": "MIS", "UPSTOX": "I", "ANGELONE": "INTRADAY", "DHAN": "INTRADAY"}[venue]
+    if venue == "KOTAKNEO":
+        body = json.loads(dict(parse_qsl(sent.content.decode()))["jData"])
+    else:
+        body = dict(parse_qsl(sent.content.decode())) if venue == "KITE" else json.loads(sent.content)
+    product = body.get("product") or body.get("producttype") or body.get("productType") or body.get("pc")
+    expected = {"KITE": "MIS", "UPSTOX": "I", "ANGELONE": "INTRADAY", "DHAN": "INTRADAY", "KOTAKNEO": "MIS"}
+    assert product == expected[venue]
 
 
-@pytest.mark.parametrize("venue", INDIAN)
+@pytest.mark.parametrize("venue", [v for v in INDIAN if v != "KOTAKNEO"])
 def test_candles_exclude_the_forming_bar(venue):
     platform, manager, _, _ = _setup(venue)
     adapter = manager.data_source_for(SBIN)

@@ -16,6 +16,7 @@ dependencies = [
     "cryptography>=42",
     "numpy>=1.26",
     "anthropic>=1.0",
+    "websockets>=13",  # broker market-data feeds (Dhan, Fyers, Kotak Neo)
     "tzdata>=2024.1; sys_platform == 'win32'",  # time zones for forex sessions on Windows
 ]
 

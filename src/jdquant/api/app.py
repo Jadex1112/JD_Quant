@@ -12,7 +12,18 @@ from fastapi.responses import FileResponse, JSONResponse
 from jdquant import __version__
 from jdquant.api.context import AppContext, Settings, build_context
 from jdquant.api.deps import Forbidden, Unauthenticated
-from jdquant.api.routes import admin, ai, auth, autopilot, connections, lab, market, research, trading
+from jdquant.api.routes import (
+    admin,
+    ai,
+    auth,
+    autopilot,
+    connections,
+    intelligence,
+    lab,
+    market,
+    research,
+    trading,
+)
 from jdquant.core.errors import NotFoundError, PlatformError, ValidationError
 from jdquant.platform import Platform
 
@@ -64,9 +75,12 @@ def create_app(
     async def lifespan(app: FastAPI):
         poller, autopilot = c.services["poller"], c.services["autopilot"]
         feed, monitor = c.services.get("demo_feed"), c.services.get("monitor")
+        intelligence = c.services.get("intelligence")
         if c.settings.background_polling:
             poller.start()
             autopilot.start()
+            if intelligence is not None:
+                intelligence.start()
             if monitor is not None:
                 monitor.start()
             if feed is not None:
@@ -74,6 +88,8 @@ def create_app(
         yield
         if feed is not None:
             feed.stop()
+        if intelligence is not None:
+            intelligence.stop()
         if monitor is not None:
             monitor.stop()
         autopilot.stop()
@@ -119,7 +135,7 @@ def create_app(
             "maintenance_mode": trading_engine.maintenance_mode,
         }
 
-    for module in (auth, admin, trading, research, connections, ai, autopilot, market, lab):
+    for module in (auth, admin, trading, research, connections, ai, autopilot, market, lab, intelligence):
         app.include_router(module.router)
     _mount_web(app, c.settings.web_dir or WEB_DIST)
     return app

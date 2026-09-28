@@ -143,6 +143,9 @@ class IndianCashBroker(VenueAdapter):
                 if source == self.venue:
                     self._refs[instrument.instrument_id] = ref
 
+    def has_ref(self, instrument: Instrument) -> bool:
+        return instrument.instrument_id in self._refs
+
     def ref(self, instrument_id: str) -> str:
         ref = self._refs.get(instrument_id)
         if ref is None:
@@ -357,6 +360,36 @@ class IndianCashBroker(VenueAdapter):
             raise VenueTimeout(f"{self.venue} returned {response.status_code}")
         self.record_success()
         return response
+
+
+def day_stats(last, open_, high, low, prev_close, volume, change=None) -> dict[str, Any] | None:
+    """Normalize a broker's day statistics; the previous close falls back to last minus change."""
+
+    def f(v):
+        try:
+            return None if v in (None, "") else float(v)
+        except (TypeError, ValueError):
+            return None
+
+    last_f = f(last)
+    if not last_f:
+        return None
+    prev = f(prev_close)
+    if not prev and f(change) is not None:
+        prev = last_f - f(change)
+    return {
+        "last": last_f,
+        "open": f(open_),
+        "high": f(high),
+        "low": f(low),
+        "prev_close": prev or None,
+        "volume": f(volume),
+    }
+
+
+def chunks(items: list, size: int):
+    for i in range(0, len(items), size):
+        yield items[i : i + size]
 
 
 def since_epoch(at: datetime) -> int:

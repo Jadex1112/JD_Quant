@@ -21,6 +21,7 @@ from jdquant.connectivity.delta import DeltaAdapter
 from jdquant.connectivity.dhan import DhanAdapter
 from jdquant.connectivity.fyers import FyersAdapter
 from jdquant.connectivity.kite import KiteAdapter
+from jdquant.connectivity.kotakneo import KotakNeoAdapter
 from jdquant.connectivity.oanda import OandaAdapter
 from jdquant.connectivity.upstox import UpstoxAdapter
 from jdquant.core.errors import NotFoundError, PlatformError, ValidationError
@@ -43,6 +44,7 @@ ADAPTERS: dict[str, type[VenueAdapter]] = {
     "ANGELONE": AngelOneAdapter,
     "DHAN": DhanAdapter,
     "DELTA": DeltaAdapter,
+    "KOTAKNEO": KotakNeoAdapter,
 }
 LOGIN_STATE_TTL = timedelta(minutes=15)
 

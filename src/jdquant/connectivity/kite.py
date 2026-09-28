@@ -20,13 +20,16 @@ from jdquant.connectivity.base import Balance, ConnectionTest, Environment, Toke
 from jdquant.connectivity.india_broker import (
     BookEntry,
     IndianCashBroker,
+    chunks,
     d,
+    day_stats,
     ist_time,
     nse_equity,
     tick_in_rupees,
 )
 from jdquant.core.clock import Clock
 from jdquant.core.types import Side
+from jdquant.marketdata.book import levels
 from jdquant.marketdata.instruments import Instrument
 from jdquant.marketdata.records import Quote
 from jdquant.markets.india import IST, Product
@@ -209,6 +212,50 @@ class KiteAdapter(IndianCashBroker):
         at = ist_time(data.get("timestamp")) or self._clock.now()
         return Quote(
             instrument.instrument_id, at, bid, d(buys[0].get("quantity")), ask, d(sells[0].get("quantity"))
+        )
+
+    def fetch_snapshots(self, instruments: list[Instrument]) -> dict[str, dict]:
+        out = {}
+        for batch in chunks(instruments, 250):
+            keys = {
+                f"NSE:{self.ref(i.instrument_id).split('|')[0]}": i.instrument_id
+                for i in batch
+                if self.has_ref(i)
+            }
+            if not keys:
+                continue
+            data = self._call("GET", "/quote", params=[("i", k) for k in keys]) or {}
+            for key, item in data.items():
+                ohlc = item.get("ohlc") or {}
+                stats = day_stats(
+                    item.get("last_price"),
+                    ohlc.get("open"),
+                    ohlc.get("high"),
+                    ohlc.get("low"),
+                    ohlc.get("close"),
+                    item.get("volume"),
+                    item.get("net_change"),
+                )
+                if stats is not None and key in keys:
+                    out[keys[key]] = stats
+        return out
+
+    def fetch_depth(self, instrument: Instrument):
+        symbol = self.ref(instrument.instrument_id).split("|")[0]
+        key = f"NSE:{symbol}"
+        data = (self._call("GET", "/quote", params={"i": key}) or {}).get(key) or {}
+        depth = data.get("depth") or {}
+        return self.book(
+            instrument,
+            bids=levels(depth.get("buy"), bid=True),
+            asks=levels(depth.get("sell"), bid=False),
+            at=ist_time(data.get("timestamp")),
+            last_price=data.get("last_price"),
+            last_quantity=data.get("last_quantity"),
+            volume=data.get("volume"),
+            open_interest=data.get("oi"),
+            total_buy_quantity=data.get("buy_quantity"),
+            total_sell_quantity=data.get("sell_quantity"),
         )
 
     def _history(self, instrument, ref, interval, start, end) -> list:

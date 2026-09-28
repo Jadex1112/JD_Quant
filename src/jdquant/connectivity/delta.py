@@ -30,6 +30,7 @@ from jdquant.connectivity.base import (
 )
 from jdquant.core.clock import Clock
 from jdquant.core.types import Side
+from jdquant.marketdata.book import levels
 from jdquant.marketdata.instruments import AssetClass, Instrument, InstrumentStatus
 from jdquant.marketdata.records import Candle, Quote
 from jdquant.oms.orders import Order, OrderStatus, OrderType, ReportType, TimeInForce
@@ -234,6 +235,18 @@ class DeltaAdapter(VenueAdapter):
         at = datetime.fromtimestamp(int(stamp) / 1_000_000, UTC) if stamp else self._clock.now()
         return Quote(
             instrument.instrument_id, at, bid, _d(quotes.get("bid_size")), ask, _d(quotes.get("ask_size"))
+        )
+
+    def fetch_depth(self, instrument: Instrument):
+        """The L2 book in contracts (each contract is `contract_multiplier` of the coin)."""
+        book = self._request("GET", f"/v2/l2orderbook/{instrument.symbol}") or {}
+        stamp = book.get("last_updated_at")
+        return self.book(
+            instrument,
+            bids=levels(book.get("buy"), bid=True, qty_key="size"),
+            asks=levels(book.get("sell"), bid=False, qty_key="size"),
+            at=datetime.fromtimestamp(int(stamp) / 1_000_000, UTC) if stamp else None,
+            capacity=20,
         )
 
     def fetch_candles(self, instrument: Instrument, interval_seconds: int, limit: int) -> list[Candle]:

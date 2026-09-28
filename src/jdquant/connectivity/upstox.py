@@ -18,13 +18,16 @@ from jdquant.connectivity.base import Balance, ConnectionTest, Environment, Toke
 from jdquant.connectivity.india_broker import (
     BookEntry,
     IndianCashBroker,
+    chunks,
     d,
+    day_stats,
     ist_time,
     nse_equity,
     tick_in_rupees,
 )
 from jdquant.core.clock import Clock
 from jdquant.core.types import Side
+from jdquant.marketdata.book import levels
 from jdquant.marketdata.instruments import Instrument
 from jdquant.marketdata.records import Quote
 from jdquant.markets.india import IST, Product
@@ -212,15 +215,64 @@ class UpstoxAdapter(IndianCashBroker):
             )
         return out
 
-    def fetch_quote(self, instrument: Instrument) -> Quote | None:
+    def _quote_item(self, instrument: Instrument) -> dict:
         key = self.ref(instrument.instrument_id)
         data = (
             self._call("GET", f"{API}/v2/market-quote/quotes", params={"instrument_key": key, "symbol": key})
             or {}
         )
-        item = next((v for v in data.values() if v.get("instrument_token") == key), None) or next(
+        return next((v for v in data.values() if v.get("instrument_token") == key), None) or next(
             iter(data.values()), {}
         )
+
+    def fetch_snapshots(self, instruments: list[Instrument]) -> dict[str, dict]:
+        out = {}
+        for batch in chunks(instruments, 400):
+            keys = {self.ref(i.instrument_id): i.instrument_id for i in batch if self.has_ref(i)}
+            if not keys:
+                continue
+            joined = ",".join(keys)
+            data = (
+                self._call(
+                    "GET",
+                    f"{API}/v2/market-quote/quotes",
+                    params={"instrument_key": joined, "symbol": joined},
+                )
+                or {}
+            )
+            for item in data.values():
+                iid = keys.get(item.get("instrument_token"))
+                ohlc = item.get("ohlc") or {}
+                stats = day_stats(
+                    item.get("last_price"),
+                    ohlc.get("open"),
+                    ohlc.get("high"),
+                    ohlc.get("low"),
+                    None,
+                    item.get("volume"),
+                    item.get("net_change"),
+                )
+                if iid and stats is not None:
+                    out[iid] = stats
+        return out
+
+    def fetch_depth(self, instrument: Instrument):
+        item = self._quote_item(instrument)
+        depth = item.get("depth") or {}
+        return self.book(
+            instrument,
+            bids=levels(depth.get("buy"), bid=True),
+            asks=levels(depth.get("sell"), bid=False),
+            at=ist_time(item.get("timestamp")),
+            last_price=item.get("last_price"),
+            volume=item.get("volume"),
+            open_interest=item.get("oi"),
+            total_buy_quantity=item.get("total_buy_quantity"),
+            total_sell_quantity=item.get("total_sell_quantity"),
+        )
+
+    def fetch_quote(self, instrument: Instrument) -> Quote | None:
+        item = self._quote_item(instrument)
         depth = item.get("depth") or {}
         buys, sells = depth.get("buy") or [], depth.get("sell") or []
         if not buys or not sells or not buys[0].get("price") or not sells[0].get("price"):
