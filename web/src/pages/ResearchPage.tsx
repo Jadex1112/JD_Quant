@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
-import { get, post, type Backtest, type Deployment, type Instrument, type StrategyTemplate } from "../api";
+import { get, post, type Backtest, type Deployment, type Instrument, type StrategyTemplate, type Tearsheet } from "../api";
 import { useApp } from "../app-state";
 import { Dialog, Empty, Section, useData } from "../components/ui";
 import { num, pct, ratio, signed, time, tone } from "../format";
@@ -278,6 +278,7 @@ function BacktestResult({ result }: { result: Backtest }) {
           <LineChart points={points} label="Backtest equity" />
         </Suspense>
       </Section>
+      {result.tearsheet && result.tearsheet.monthly.length > 0 && <TearsheetView sheet={result.tearsheet} />}
       <Section title={`Trades (${result.trades.length}) · ${result.order_count} orders · ${result.fill_count} fills`}>
         {result.trades.length === 0 ? (
           <Empty>The strategy did not complete any round-trip trades.</Empty>
@@ -320,5 +321,65 @@ function BacktestResult({ result }: { result: Backtest }) {
         </ul>
       </Section>
     </>
+  );
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+function heat(value: number | null): React.CSSProperties {
+  if (value == null) return {};
+  const strength = Math.min(1, Math.abs(value) / 0.1) * 45;
+  return { background: `color-mix(in srgb, var(${value >= 0 ? "--pos" : "--neg"}) ${strength.toFixed(0)}%, transparent)` };
+}
+
+function TearsheetView({ sheet }: { sheet: Tearsheet }) {
+  const years = sheet.yearly.map((y) => y.year);
+  const cell = (year: number, month: number) => sheet.monthly.find((m) => m.year === year && m.month === month)?.return ?? null;
+  return (
+    <Section title="Tearsheet">
+      <div className="table-wrap">
+        <table className="heat" aria-label="Monthly returns">
+          <thead>
+            <tr><th>Year</th>{MONTHS.map((m) => <th key={m}>{m}</th>)}<th>Year</th></tr>
+          </thead>
+          <tbody>
+            {years.map((y) => (
+              <tr key={y}>
+                <td>{y}</td>
+                {MONTHS.map((_, i) => {
+                  const v = cell(y, i + 1);
+                  return <td key={i} style={heat(v)}>{v == null ? "" : pct(v, 1)}</td>;
+                })}
+                <td style={heat(sheet.yearly.find((r) => r.year === y)?.return ?? null)}>
+                  <strong>{pct(sheet.yearly.find((r) => r.year === y)?.return ?? null, 1)}</strong>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {sheet.drawdowns.length > 0 && (
+        <>
+          <h3 style={{ marginTop: 16 }}>Worst drawdowns</h3>
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>Depth</th><th>Peak</th><th>Trough</th><th>Recovered</th><th>Days down</th><th>Days to recover</th></tr></thead>
+              <tbody>
+                {sheet.drawdowns.map((d) => (
+                  <tr key={d.peak}>
+                    <td className="neg">{pct(d.depth, 1)}</td>
+                    <td className="small">{time(d.peak)}</td>
+                    <td className="small">{time(d.trough)}</td>
+                    <td className="small">{d.recovered ? time(d.recovered) : "not yet"}</td>
+                    <td>{d.days_to_trough}</td>
+                    <td>{d.days_to_recover ?? "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </Section>
   );
 }

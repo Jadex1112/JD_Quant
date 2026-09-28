@@ -115,6 +115,8 @@ class StrategyContext:
         self.entry_gate: Any = None
         # Live market-intelligence features (order flow, walls, VWAP...) when the platform provides them.
         self.features_source: Any = None
+        # Kronos forecasts, set only for paper and live runs (backtests cannot use them honestly).
+        self.forecast_source: Any = None
         from jdquant.strategy.exits import ExitManager
 
         self.exits = ExitManager()

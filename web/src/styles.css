@@ -236,3 +236,17 @@ tr[aria-selected="true"] td { background: var(--surface-2); }
 .stages .stage.current { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); }
 .bot-state { font-size: 28px; font-weight: 700; }
 pre.wrap { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; margin: 0; }
+.lines { width: 100%; height: auto; display: block; }
+.lines .grid { stroke: var(--border); stroke-width: 0.6; }
+.lines .zero { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 3 3; }
+.lines .mark { stroke: var(--warn); stroke-width: 1; stroke-dasharray: 2 3; }
+.lines .tick { font-size: 10px; fill: var(--text-muted); }
+.lines .line { fill: none; stroke-width: 2; }
+.lines .line.main { stroke: var(--accent); }
+.lines .line.alt { stroke: var(--pos); }
+.lines .line.band { stroke: var(--warn); stroke-width: 1.2; stroke-dasharray: 4 3; }
+.lines .line.muted { stroke: var(--text-muted); stroke-width: 1.2; }
+.heat td { text-align: right; font-variant-numeric: tabular-nums; }
+.legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--text-muted); }
+.legend span::before { content: ""; display: inline-block; width: 14px; height: 2px; margin-right: 4px; vertical-align: middle; background: currentColor; }
+.legend .main { color: var(--accent); } .legend .alt { color: var(--pos); } .legend .band { color: var(--warn); } .legend .muted { color: var(--text-muted); }

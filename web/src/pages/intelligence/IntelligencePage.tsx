@@ -6,6 +6,7 @@ import { Badge, Empty, Section, StatusBadge, useData } from "../../components/ui
 import { num, pct, signed, time, tone } from "../../format";
 import { EventsTab, OptionsTab, ScannerTab } from "./MarketTabs";
 import { HealthTab, NewsTab, ReplayTab, SettingsTab } from "./DataTabs";
+import { ForecastTab, PayoffTab } from "./LabTabs";
 import {
   px,
   EventDetail,
@@ -25,6 +26,8 @@ const TABS = [
   ["instrument", "Order book & flow"],
   ["scanner", "Scanner"],
   ["options", "Options & futures"],
+  ["payoff", "Payoff lab"],
+  ["forecast", "Forecast (Kronos)"],
   ["events", "Events"],
   ["replay", "Replay"],
   ["news", "News"],
@@ -78,6 +81,8 @@ export function IntelligencePage() {
       {tab === "instrument" && <InstrumentTab instrumentId={instrument} pick={(iid) => go("instrument", iid)} />}
       {tab === "scanner" && <ScannerTab open={(iid) => go("instrument", iid)} />}
       {tab === "options" && <OptionsTab />}
+      {tab === "payoff" && <PayoffTab />}
+      {tab === "forecast" && <ForecastTab />}
       {tab === "events" && <EventsTab />}
       {tab === "replay" && <ReplayTab />}
       {tab === "news" && <NewsTab />}

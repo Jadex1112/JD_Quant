@@ -135,9 +135,9 @@ def _autopilot() -> tuple[type[Strategy], ...]:
 
 
 def _flow() -> tuple[type[Strategy], ...]:
-    from jdquant.strategy.flow import LiquidityWallBounce, OrderFlowMomentum, VwapReclaim
+    from jdquant.strategy.flow import KronosForecast, LiquidityWallBounce, OrderFlowMomentum, VwapReclaim
 
-    return VwapReclaim, OrderFlowMomentum, LiquidityWallBounce
+    return VwapReclaim, OrderFlowMomentum, LiquidityWallBounce, KronosForecast
 
 
 TEMPLATES: dict[str, type[Strategy]] = {

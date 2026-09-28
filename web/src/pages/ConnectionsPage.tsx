@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { get, post, put, type Connection } from "../api";
 import { useApp } from "../app-state";
-import { Confirm, Dialog, Empty, Section, StatusBadge, useData } from "../components/ui";
+import { Badge, Confirm, Dialog, Empty, Section, StatusBadge, useData } from "../components/ui";
 import { num, time } from "../format";
 
 interface Balance {
@@ -321,6 +321,7 @@ export const BROKERS: Record<string, BrokerSpec> = {
 };
 
 export function brokerName(venue: string): string {
+  if (venue.startsWith("CCXT_")) return `${venue.slice(5).charAt(0)}${venue.slice(6).toLowerCase()} (via CCXT)`;
   return BROKERS[venue]?.label ?? venue;
 }
 
@@ -338,6 +339,7 @@ function CreateConnection({ onClose }: { onClose: (created?: Connection) => void
   const [product, setProduct] = useState("CNC");
   const [busy, setBusy] = useState(false);
   const [filter, setFilter] = useState<"All" | "India" | "Global">("All");
+  const [ccxt, setCcxt] = useState(false);
   const spec = venue ? BROKERS[venue] : null;
 
   const pick = (v: string) => {
@@ -373,6 +375,8 @@ function CreateConnection({ onClose }: { onClose: (created?: Connection) => void
     if (created) onClose(created);
   };
 
+  if (ccxt) return <CcxtConnect onClose={onClose} onBack={() => setCcxt(false)} />;
+
   if (!venue || !spec) {
     const shown = Object.entries(BROKERS).filter(([, b]) => filter === "All" || b.region === filter);
     return (
@@ -393,6 +397,11 @@ function CreateConnection({ onClose }: { onClose: (created?: Connection) => void
                 <div className="small muted">{b.login ? "sign in with the broker" : b.totp || b.neo ? "signs in by itself" : "API keys"}</div>
               </button>
             ))}
+            <button className="card" style={{ textAlign: "left", cursor: "pointer" }} onClick={() => setCcxt(true)}>
+              <strong>More crypto exchanges</strong>
+              <div className="small muted">100+ exchanges through CCXT, incl. Bitbns, ZebPay and Mudrex (India)</div>
+              <div className="small muted">API keys, or none for market data</div>
+            </button>
           </div>
         </div>
       </Dialog>
@@ -641,6 +650,133 @@ function PinDialog({ connection, onClose }: { connection: Connection; onClose: (
         <div className="row end">
           <button type="button" onClick={() => save(null)}>Remove stored PIN</button>
           <button className="primary" type="submit">Save PIN</button>
+        </div>
+      </form>
+    </Dialog>
+  );
+}
+
+interface CcxtExchange {
+  id: string;
+  venue: string;
+  name: string;
+  countries: string[];
+  indian: boolean;
+  testnet: boolean;
+  candles: boolean;
+  order_book: boolean;
+  trading: boolean;
+  swaps: boolean;
+  needs_password: boolean;
+}
+
+function CcxtConnect({ onClose, onBack }: { onClose: (created?: Connection) => void; onBack: () => void }) {
+  const { run } = useApp();
+  const list = useData(() => get<{ available: boolean; message?: string; exchanges: CcxtExchange[] }>("/connections/ccxt-exchanges"), []);
+  const [query, setQuery] = useState("");
+  const [picked, setPicked] = useState<CcxtExchange | null>(null);
+  const [form, setForm] = useState({ name: "", environment: "PRODUCTION", market_type: "spot", quotes: "", key: "", secret: "", password: "", currency: "USDT" });
+  const [busy, setBusy] = useState(false);
+
+  if (!picked) {
+    const shown = (list.data?.exchanges ?? []).filter((e) => !query || e.name.toLowerCase().includes(query.toLowerCase()) || e.id.includes(query.toLowerCase()));
+    return (
+      <Dialog title="Connect a crypto exchange (CCXT)" onClose={() => onClose()}>
+        <div className="stack">
+          <button type="button" className="link small" style={{ alignSelf: "flex-start" }} onClick={onBack}>← All brokers</button>
+          {list.data && !list.data.available ? (
+            <div className="alert warn small">CCXT is not installed on the server: {list.data.message}</div>
+          ) : (
+            <>
+              <input aria-label="Search exchanges" placeholder="Search exchanges" value={query} onChange={(e) => setQuery(e.target.value)} />
+              <div style={{ maxHeight: 380, overflowY: "auto" }} className="stack">
+                {shown.map((e) => (
+                  <button
+                    key={e.id}
+                    className="card"
+                    style={{ textAlign: "left", cursor: "pointer", boxShadow: "none" }}
+                    onClick={() => {
+                      setPicked(e);
+                      setForm((f) => ({ ...f, name: e.name, currency: e.indian ? "INR" : "USDT", quotes: e.indian ? "INR" : "", environment: e.testnet ? "TESTNET" : "PRODUCTION" }));
+                    }}
+                  >
+                    <strong>{e.name}</strong> {e.indian && <Badge kind="good">India</Badge>}
+                    <div className="small muted">
+                      {[e.trading && "trading", e.order_book && "order book", e.candles ? "candles" : "no candle history", e.swaps && "perpetuals", e.testnet && "testnet"]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      </Dialog>
+    );
+  }
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    const secret = form.key ? (form.password ? JSON.stringify({ secret: form.secret, password: form.password }) : form.secret) : null;
+    const created = await run(
+      () =>
+        post<Connection>("/connections", {
+          name: form.name,
+          venue: picked.venue,
+          environment: form.environment,
+          api_key: form.key || null,
+          api_secret: secret,
+          base_currency: form.currency,
+          settings: { market_type: form.market_type, quotes: form.quotes.split(/[ ,]+/).map((q) => q.trim().toUpperCase()).filter(Boolean) },
+        }),
+      "Connection added",
+    );
+    setBusy(false);
+    if (created) onClose(created);
+  };
+
+  return (
+    <Dialog title={`Connect ${picked.name}`} onClose={() => onClose()}>
+      <form className="stack" onSubmit={submit} autoComplete="off">
+        <button type="button" className="link small" style={{ alignSelf: "flex-start" }} onClick={() => setPicked(null)}>← All exchanges</button>
+        <div className="form-grid">
+          <label className="field">Name<input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></label>
+          <label className="field">
+            Environment
+            <select value={form.environment} onChange={(e) => setForm({ ...form, environment: e.target.value })}>
+              {picked.testnet && <option value="TESTNET">Testnet (test funds)</option>}
+              <option value="PRODUCTION">Production (real money)</option>
+            </select>
+          </label>
+          <label className="field">
+            Markets
+            <select value={form.market_type} onChange={(e) => setForm({ ...form, market_type: e.target.value })}>
+              <option value="spot">Spot</option>
+              {picked.swaps && <option value="both">Spot and perpetual swaps</option>}
+              {picked.swaps && <option value="swap">Perpetual swaps only</option>}
+            </select>
+          </label>
+          <label className="field">Quote currencies <span className="small muted">(e.g. INR USDT; empty: all)</span><input value={form.quotes} onChange={(e) => setForm({ ...form, quotes: e.target.value })} /></label>
+          <label className="field">Account currency<input value={form.currency} onChange={(e) => setForm({ ...form, currency: e.target.value.toUpperCase() })} /></label>
+          <label className="field">API key <span className="small muted">(optional for market data)</span><input value={form.key} onChange={(e) => setForm({ ...form, key: e.target.value })} spellCheck={false} /></label>
+          <label className="field">API secret<input type="password" value={form.secret} required={!!form.key} onChange={(e) => setForm({ ...form, secret: e.target.value })} autoComplete="new-password" /></label>
+          {picked.needs_password && (
+            <label className="field">Passphrase<input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} autoComplete="new-password" /></label>
+          )}
+        </div>
+        <div className="alert small">
+          Create API keys with trading permission only: CCXT cannot check whether a key can withdraw funds, so this is up to
+          you. {!picked.candles && `${picked.name} publishes no candle history through CCXT; charts will build from live prices.`}
+        </div>
+        {picked.indian && (
+          <div className="alert small">Crypto gains in India are taxed at 30% with 1% TDS on sales; use exchanges registered with FIU-IND.</div>
+        )}
+        {form.environment === "PRODUCTION" && form.key && <div className="alert warn small">Orders through a production connection trade real money. Risk limits, guards and kill switches still apply.</div>}
+        <div className="row end">
+          <button type="button" onClick={() => onClose()}>Cancel</button>
+          <button className="primary" type="submit" disabled={busy}>{busy ? "Connecting…" : "Add and test"}</button>
         </div>
       </form>
     </Dialog>

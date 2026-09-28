@@ -287,6 +287,56 @@ def _attach_automation(platform, store, services, connections, runner, intellige
         circuit=circuit,
         balances=balances,
     )
+    services["forecasts"] = _forecast_service(platform, store, services)
+    runner.forecast = lambda iid, candles, interval, horizon: services["forecasts"].forecast_candles(
+        iid, candles, interval_seconds=interval, horizon=horizon
+    )
+    intelligence.periodic.append(("forecast-score", 300, services["forecasts"].score_due))
+    from jdquant.ai.research_desk import ResearchDesk
+
+    services["desk"] = ResearchDesk(
+        platform,
+        store,
+        chat=lambda: services["lab"].chat,
+        history=_history_source(platform, services),
+        intelligence=intelligence,
+        forecasts=services["forecasts"],
+    )
+    intelligence.periodic.append(("desk-score", 600, services["desk"].score_due))
     services["registry"] = StrategyRegistry(
         store, platform, candles=services["autopilot"]._venue_candles, journal=journal, runner=runner
     )
+
+
+def _forecast_service(platform, store, services):
+    """Kronos forecasts from broker history."""
+    from jdquant.forecast.service import ForecastService
+
+    return ForecastService(platform, store, history=_history_source(platform, services))
+
+
+def _history_source(platform, services):
+    """Broker candles for forecasts and the research desk; synthetic (labelled) only in demo mode."""
+    from datetime import timedelta
+    from decimal import Decimal
+
+    from jdquant.core.errors import PlatformError
+    from jdquant.marketdata.synthetic import random_walk_candles
+
+    def history(instrument, interval_seconds, bars):
+        candles = services["autopilot"]._venue_candles(instrument, interval_seconds, bars)
+        if candles:
+            return candles, "broker history"
+        if services.get("demo_feed") is None:
+            raise PlatformError(
+                "HISTORY_UNAVAILABLE",
+                f"connect {instrument.venue}'s broker for {instrument.instrument_id} history",
+            )
+        ref = platform.market.reference_price(instrument.instrument_id) or Decimal(100)
+        start = platform.clock.now() - timedelta(seconds=interval_seconds * bars)
+        candles = random_walk_candles(
+            instrument, start, bars, interval_seconds=interval_seconds, start_price=ref
+        )
+        return candles, "synthetic (demo; not recorded)"
+
+    return history

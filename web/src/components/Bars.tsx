@@ -74,3 +74,58 @@ export function Profile({
     </svg>
   );
 }
+
+/** Several lines over a shared numeric x axis, with an optional zero line and a text summary for screen readers. */
+export function Lines({
+  series,
+  label,
+  height = 220,
+  zero = false,
+  marks = [],
+}: {
+  series: { name: string; points: [number, number][]; kind?: "main" | "alt" | "band" | "muted" }[];
+  label: string;
+  height?: number;
+  zero?: boolean;
+  marks?: { x: number; name: string }[];
+}) {
+  const all = series.flatMap((s) => s.points);
+  if (!all.length) return null;
+  const xs = all.map((p) => p[0]);
+  const ys = all.map((p) => p[1]).concat(zero ? [0] : []);
+  const [x0, x1] = [Math.min(...xs), Math.max(...xs)];
+  const [y0, y1] = [Math.min(...ys), Math.max(...ys)];
+  const pad = (y1 - y0) * 0.08 || 1;
+  const W = 600;
+  const X = (x: number) => ((x - x0) / (x1 - x0 || 1)) * (W - 50) + 45;
+  const Y = (y: number) => height - 18 - ((y - (y0 - pad)) / (y1 - y0 + 2 * pad)) * (height - 28);
+  const ticks = [y0 - pad, (y0 + y1) / 2, y1 + pad];
+  return (
+    <svg className="lines" viewBox={`0 0 ${W} ${height}`} role="img" aria-label={label}>
+      {ticks.map((t) => (
+        <g key={t}>
+          <line x1={45} x2={W - 5} y1={Y(t)} y2={Y(t)} className="grid" />
+          <text x={40} y={Y(t) + 3} textAnchor="end" className="tick">
+            {Math.abs(t) >= 1000 ? t.toLocaleString(undefined, { maximumFractionDigits: 0 }) : t.toPrecision(4)}
+          </text>
+        </g>
+      ))}
+      {zero && y0 < 0 && y1 > 0 && <line x1={45} x2={W - 5} y1={Y(0)} y2={Y(0)} className="zero" />}
+      {marks.map((m) => (
+        <g key={m.name + m.x}>
+          <line x1={X(m.x)} x2={X(m.x)} y1={8} y2={height - 18} className="mark" />
+          <text x={X(m.x) + 3} y={16} className="tick">{m.name}</text>
+        </g>
+      ))}
+      {series.map((s) => (
+        <polyline
+          key={s.name}
+          className={`line ${s.kind ?? "main"}`}
+          points={s.points.map(([x, y]) => `${X(x).toFixed(1)},${Y(y).toFixed(1)}`).join(" ")}
+        >
+          <title>{s.name}</title>
+        </polyline>
+      ))}
+    </svg>
+  );
+}

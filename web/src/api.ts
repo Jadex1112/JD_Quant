@@ -206,7 +206,14 @@ export interface StrategyTemplate {
   parameters: Record<string, { type: string; default: unknown; min: string | null; max: string | null; description: string }>;
 }
 
+export interface Tearsheet {
+  monthly: { year: number; month: number; return: number | null }[];
+  yearly: { year: number; return: number | null }[];
+  drawdowns: { peak: string; trough: string; recovered: string | null; depth: number; days_to_trough: number; days_to_recover: number | null }[];
+}
+
 export interface Backtest {
+  tearsheet?: Tearsheet | null;
   reproducibility_hash: string;
   final_equity: string;
   metrics: Record<string, number | null>;

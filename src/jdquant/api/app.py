@@ -19,6 +19,8 @@ from jdquant.api.routes import (
     automation,
     autopilot,
     connections,
+    desk,
+    forecasts,
     intelligence,
     lab,
     market,
@@ -150,6 +152,8 @@ def create_app(
         intelligence,
         automation,
         strategies,
+        forecasts,
+        desk,
     ):
         app.include_router(module.router)
     _mount_web(app, c.settings.web_dir or WEB_DIST)

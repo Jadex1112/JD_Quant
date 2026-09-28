@@ -305,3 +305,77 @@ def _vwap_path(bars: list[Candle]) -> list[float] | None:
         turnover += v * (float(b.high) + float(b.low) + float(b.close)) / 3
         out.append(turnover / volume if volume else float(b.close))
     return out if volume > 0 else None
+
+
+class KronosForecast(Strategy):
+    """Trades Kronos forecasts on a paper (or live) account; it cannot be backtested honestly."""
+
+    name = "kronos_forecast"
+    backtestable = False
+    not_backtestable_reason = (
+        "kronos_forecast runs on paper or live accounts only: Kronos may have seen past periods in "
+        "pre-training, so a backtest would overstate it"
+    )
+    description = (
+        "Go long when Kronos gives at least the chosen probability that price is higher after the horizon "
+        "(short on the mirror image, if allowed); leave when the forecast turns or after the horizon. "
+        "Paper or live only: Kronos may have seen past periods in pre-training, so backtests flatter it."
+    )
+    parameters = {
+        "quantity": Param(Decimal, "1", min=Decimal("0")),
+        "allow_short": Param(bool, False),
+        "horizon": Param(int, 12, min=1, max=120),
+        "min_probability": Param(Decimal, "0.65", min=Decimal("0.5"), max=Decimal("0.99")),
+        "stop_pct": Param(Decimal, "1.0", min=Decimal(0), max=Decimal(50)),
+        "lookback": Param(int, 400, min=60, max=2048),
+    }
+
+    def on_bar(self, candle: Candle) -> None:
+        source = getattr(self.ctx, "forecast_source", None)
+        if source is None:
+            from jdquant.core.errors import PlatformError
+
+            raise PlatformError("PAPER_OR_LIVE_ONLY", self.not_backtestable_reason)
+        iid = candle.instrument_id
+        if self.ctx.open_orders(iid):
+            return
+        p = self.ctx.params
+        bars = self.ctx.candles(iid, p["lookback"])
+        if len(bars) < 60:
+            return
+        interval = int((candle.close_ts - candle.open_ts).total_seconds())
+        forecast = source(iid, bars, interval, p["horizon"])
+        prob = forecast["prob_up"]
+        close = float(candle.close)
+        position = self.ctx.position(iid)
+        direction = 0 if position == 0 else (1 if position > 0 else -1)
+        reason = self.ctx.exits.check(
+            iid, high=float(candle.high), low=float(candle.low), close=close, at=candle.close_ts
+        )
+        need = float(p["min_probability"])
+        if direction > 0 and (reason or prob < 0.5):
+            self.ctx.explain(reason or "FORECAST_TURNED", exit_reason=reason or "FORECAST_TURNED")
+            self.ctx.order_target(iid, Decimal(0))
+        elif direction < 0 and (reason or prob > 0.5):
+            self.ctx.explain(reason or "FORECAST_TURNED", exit_reason=reason or "FORECAST_TURNED")
+            self.ctx.order_target(iid, Decimal(0))
+        elif direction == 0 and (prob >= need or (prob <= 1 - need and p["allow_short"])):
+            d = 1 if prob >= need else -1
+            stop = close * (1 - d * float(p["stop_pct"]) / 100) if float(p["stop_pct"]) else None
+            self.ctx.explain(
+                "KRONOS_UP" if d > 0 else "KRONOS_DOWN",
+                confidence=prob if d > 0 else 1 - prob,
+                stop=stop,
+                target=forecast["p50"],
+            )
+            self.ctx.order_target(iid, p["quantity"] * d)
+            self.ctx.exits.attach(
+                iid,
+                ExitPlan(
+                    d,
+                    close,
+                    candle.close_ts,
+                    stop=stop,
+                    time_limit_minutes=interval * p["horizon"] // 60 or 1,
+                ),
+            )

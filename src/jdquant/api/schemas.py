@@ -172,6 +172,7 @@ class BacktestOut(BaseModel):
     trades: list[TradeOut]
     equity_curve: list[tuple[datetime, Dec]]
     assumptions: list[str]
+    tearsheet: dict[str, Any] | None = None
 
 
 class StrategyTemplateOut(BaseModel):

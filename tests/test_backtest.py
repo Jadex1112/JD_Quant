@@ -4,7 +4,7 @@ from decimal import Decimal
 import pytest
 
 from jdquant.backtest.engine import BacktestConfig, run_backtest
-from jdquant.core.errors import ValidationError
+from jdquant.core.errors import PlatformError, ValidationError
 from jdquant.execution.simulator import FeeSchedule
 from jdquant.marketdata.records import Candle
 from jdquant.marketdata.synthetic import random_walk_candles
@@ -120,7 +120,11 @@ def test_repeated_strategy_errors_fail_the_deployment():
 def test_all_templates_run():
     from jdquant.strategy.templates import TEMPLATES
 
-    for name in TEMPLATES:
+    for name, cls in TEMPLATES.items():
+        if not getattr(cls, "backtestable", True):  # e.g. kronos_forecast: paper or live only
+            with pytest.raises(PlatformError, match="BACKTEST_UNSUPPORTED"):
+                run_backtest(BacktestConfig(name, [BTC], _data(400)))
+            continue
         result = run_backtest(BacktestConfig(name, [BTC], _data(400)))
         assert result.equity_curve
 

@@ -18,6 +18,7 @@ import { TradingPage } from "./pages/TradingPage";
 
 const IntelligencePage = lazy(() => import("./pages/intelligence/IntelligencePage").then((m) => ({ default: m.IntelligencePage })));
 const AutomationPage = lazy(() => import("./pages/AutomationPage").then((m) => ({ default: m.AutomationPage })));
+const DeskPage = lazy(() => import("./pages/DeskPage").then((m) => ({ default: m.DeskPage })));
 const PipelinePage = lazy(() => import("./pages/PipelinePage").then((m) => ({ default: m.PipelinePage })));
 
 type AuthState = { kind: "loading" } | { kind: "setup" } | { kind: "login"; message?: string } | { kind: "in"; me: Me };
@@ -59,6 +60,7 @@ export function App() {
           <Route path="/intelligence" element={<IntelligencePage />} />
           <Route path="/automation" element={<AutomationPage />} />
           <Route path="/pipeline" element={<PipelinePage />} />
+          <Route path="/desk" element={<DeskPage />} />
           <Route path="/strategies" element={<StrategiesPage />} />
           <Route path="/lab" element={<LabPage />} />
           <Route path="/research" element={<ResearchPage />} />

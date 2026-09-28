@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Request
 
+from jdquant.analytics.tearsheet import tearsheet
 from jdquant.api.deps import ctx, require
 from jdquant.api.schemas import BacktestIn, BacktestOut, StrategyTemplateOut, TradeOut
 from jdquant.backtest.engine import BacktestConfig, run_backtest
@@ -94,4 +95,5 @@ def create_backtest(
         trades=[TradeOut(**{**t.__dict__, "net_pnl": t.net_pnl}) for t in result.trades],
         equity_curve=result.equity_curve,
         assumptions=list(result.assumptions),
+        tearsheet=tearsheet(result.equity_curve),
     )

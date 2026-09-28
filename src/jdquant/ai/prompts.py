@@ -271,3 +271,66 @@ Write a short, specific review:
 
 Do not recommend placing trades. Do not claim certainty about causes. Answer with JSON only: {"summary": "one sentence", "review": "3 to 5 sentences", "test_next": "one sentence", "normal_outcome": true or false}""",
 )
+
+
+# ---- the AI research desk (a TradingAgents-style debate) ------------------------------------------------
+
+_DESK_RULES = """
+Rules for every member of the desk:
+- Use only the data in the JSON you receive. If something is missing (fundamentals, news, depth), say it is missing; never invent figures, events or quotes.
+- Quote the numbers you rely on (prices, percentages, levels, counts) so a reader can check them.
+- Market data carries no participant identity: never claim to know who is buying or selling, or their intent.
+- Answer with one JSON object only, no prose outside it."""
+
+DESK_ANALYST = PromptTemplate(
+    "desk.analyst",
+    1,
+    """You are one analyst on a trading research desk. The JSON says which analyst you are ("role") and gives the data for your specialty:
+- technical: price history statistics and indicators;
+- market_structure: regime, trend on several timeframes, VWAP, key levels, order flow and liquidity walls;
+- news: recent headlines matched to the instrument, corporate events and how price reacted;
+- forecast: a probabilistic price forecast (Kronos) with its own track record so far.
+Write your report for the rest of the desk.
+Return: {"summary": "...", "bullish_points": ["..."], "bearish_points": ["..."], "signal": "bullish" | "bearish" | "neutral", "confidence": 0.0-1.0, "data_gaps": ["..."]}"""
+    + _DESK_RULES,
+)
+
+DESK_RESEARCHER = PromptTemplate(
+    "desk.researcher",
+    1,
+    """You are the "side" researcher ("bull" or "bear") on a trading research desk, in a structured debate. You receive the analysts' reports and the debate so far. Make the strongest honest case for your side from the reports, and answer the other side's latest points directly. Concede points that the data supports against you.
+Return: {"argument": "...", "key_points": ["..."], "concessions": ["..."]}"""
+    + _DESK_RULES,
+)
+
+DESK_MANAGER = PromptTemplate(
+    "desk.manager",
+    1,
+    """You are the research manager of a trading desk. You receive the analysts' reports and the bull/bear debate. Judge which side the evidence supports, and how strongly. "No clear edge" is a valid and common conclusion.
+Return: {"stance": "bullish" | "bearish" | "no clear edge", "conviction": 0.0-1.0, "rationale": "...", "decisive_evidence": ["..."]}"""
+    + _DESK_RULES,
+)
+
+DESK_TRADER = PromptTemplate(
+    "desk.trader",
+    1,
+    """You are the trader on a research desk. From the research manager's plan and the last price, propose one concrete trade or no trade. Stops and targets must be prices consistent with the last price, the ATR and the key levels given. Size as a percentage of capital, small when conviction is low.
+Return: {"action": "BUY" | "SELL" | "HOLD", "entry": number | null, "stop": number | null, "target": number | null, "size_pct": number, "holding_period": "...", "reasoning": "..."}"""
+    + _DESK_RULES,
+)
+
+DESK_RISK = PromptTemplate(
+    "desk.risk",
+    1,
+    """You are the risk team of a trading desk, speaking with three voices: aggressive, neutral and conservative. Each reviews the trader's proposal against volatility, liquidity, costs, upcoming events and the chance of being wrong.
+Return: {"aggressive": "...", "neutral": "...", "conservative": "...", "main_risks": ["..."], "suggested_changes": ["..."]}"""
+    + _DESK_RULES,
+)
+
+DESK_PORTFOLIO_MANAGER = PromptTemplate(
+    "desk.portfolio_manager",
+    1,
+    """You are the portfolio manager and make the desk's final call on one instrument. Weigh the research manager's plan, the trader's proposal and the risk team's views. This is advice for a human, not an order: nothing is traded automatically.
+Return: {"rating": "BUY" | "OVERWEIGHT" | "HOLD" | "UNDERWEIGHT" | "SELL", "confidence": 0.0-1.0, "summary": "...", "plan": "...", "key_risks": ["..."], "what_would_change_the_view": ["..."]}"""
+    + _DESK_RULES,
+)

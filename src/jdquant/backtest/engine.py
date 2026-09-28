@@ -14,7 +14,7 @@ from typing import Any
 from jdquant.analytics.metrics import summarize
 from jdquant.analytics.trades import RoundTrip, round_trips
 from jdquant.core.clock import SimulatedClock
-from jdquant.core.errors import ValidationError
+from jdquant.core.errors import PlatformError, ValidationError
 from jdquant.core.events import Event, EventBus
 from jdquant.core.ids import SequentialIds
 from jdquant.core.types import ZERO
@@ -127,6 +127,10 @@ def reproducibility_hash(config: BacktestConfig, strategy_cls: type[Strategy]) -
 
 def run_backtest(config: BacktestConfig) -> BacktestResult:
     strategy_cls = _resolve_strategy(config.strategy)
+    if not getattr(strategy_cls, "backtestable", True):
+        raise PlatformError(
+            "BACKTEST_UNSUPPORTED", getattr(strategy_cls, "not_backtestable_reason", "cannot be backtested")
+        )
     errors = _validate(config)
     if errors:
         raise ValidationError("BACKTEST_CONFIG_INVALID", errors)

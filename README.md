@@ -33,7 +33,7 @@ Development: `npm run dev` in `web/` serves the UI with hot reload on port 5173 
 Tests and checks:
 
 ```bash
-.venv/bin/pytest                     # 380 tests, traced to SRS acceptance criteria
+.venv/bin/pytest                     # 397 tests, traced to SRS acceptance criteria
 .venv/bin/ruff check . && .venv/bin/ruff format --check .
 (cd web && npm run typecheck)
 ```
@@ -214,6 +214,7 @@ Orders are fill-or-kill market orders or limit orders, tagged with the platform'
 | **Delta Exchange India** | Crypto perpetual futures, long or short | API key and secret; testnet by default |
 | **Binance** | Crypto spot | API key and secret; testnet by default |
 | **Alpaca** | US stocks | API key and secret; paper by default |
+| **More crypto exchanges (CCXT)** | 100+ crypto exchanges, incl. Bitbns, ZebPay and Mudrex in India, spot and perpetual swaps | API key and secret (none for market data only); testnet where the exchange has one. Needs `pip install "jdquant[crypto]"` |
 
 For the sign-in brokers (Fyers, Kite, Upstox), set the app's redirect URL to `http://127.0.0.1:8000/api/v1/connections/oauth/callback` (or your `JDQ_PUBLIC_URL`); the sign-in dialog shows the exact URL. Every credential and session token is stored encrypted.
 
@@ -265,6 +266,18 @@ DEVELOPMENT → BACKTEST → VALIDATION → PAPER → APPROVED → LIVE
 | Live | Deployed on a live account by a person; the account's limits, guards and breakers apply |
 
 A new version starts again at DEVELOPMENT while the live one keeps trading. **Roll back** stops the live version and redeploys the previous approved one. Strategy-lab results can be added to the pipeline with one click. Nothing the AI writes can skip a gate, and passing them is evidence, not a guarantee.
+
+## AI research desk
+
+**AI research desk** runs a debate modelled on [TradingAgents](https://github.com/TauricResearch/TradingAgents): analysts (technical, market structure and order flow, news and corporate events, and a Kronos forecast when installed) write reports from the platform's own data; a bull and a bear researcher debate for one to three rounds; a research manager judges; a trader proposes a trade with a stop and target; a risk team (aggressive, neutral, conservative) objects; and a portfolio manager gives a rating from BUY to SELL. It uses the configured model (Nemotron, Kimi K3 or any NVIDIA model id, or Claude), takes about nine model calls, and every figure the members may quote is computed by the platform and handed to them. It is advice for a person: nothing is traded from it. Every rating is scored against what the price did after its horizon, because language-model trading research has little independent evidence of an edge.
+
+## Kronos forecasts
+
+**Market intelligence → Forecast (Kronos)** runs [Kronos](https://github.com/shiyu-coder/Kronos) (MIT; AAAI 2026), a foundation model trained on candlesticks from 45 exchanges. It samples 16 possible futures and reports the chance the price is higher after the horizon, the median move and a 10–90% band. Every forecast on real data is scored forward (direction, Brier score, band coverage) and the scorecard says whether it has beaten a coin flip. The `kronos_forecast` strategy trades the forecasts on a paper or live account; it refuses backtests, because Kronos may already have seen past periods in pre-training. Kronos needs PyTorch: `pip install "jdquant[forecast]"`; the weights (Kronos-mini, -small or -base) download from Hugging Face on first use.
+
+## Options payoff lab and tearsheets
+
+**Market intelligence → Payoff lab** builds multi-leg positions (calls, puts, futures, the underlying) from scratch or presets (straddle, strangle, spreads, iron condor, covered call) and shows the P&L at expiry and today, breakevens, maximum profit and loss, net Greeks, a scenario grid (price move × volatility change × days passed) and the chance of profit under a lognormal model. Backtests now include a **tearsheet**: returns by month and year, and the worst drawdowns with how long they took to recover.
 
 ## AI director
 
@@ -351,7 +364,8 @@ Autopilot settings (universe, budget, bar size, stops, capital protection, charg
 | `connectivity` | 45–46 | Venue adapter contract, OANDA, Fyers, Zerodha Kite, Upstox, Angel One, Dhan, Kotak Neo, Delta Exchange, Binance and Alpaca adapters, WebSocket feeds (Dhan, Fyers, Neo), broker OAuth, account router, connection manager, poller |
 | `markets` | — | Charges for NSE cash, MCX, currency futures, crypto, and forex spread and financing; per-market sessions (incl. forex 24/5) and asset groups |
 | `autopilot` | 24–25, 57 | Autopilot strategies (incl. the AI trader), the strategy lab, candidate generation, walk-forward research with deflated Sharpe, the controller, the per-minute AI trader and monitor, and lessons from losing trades |
-| `ai` | 52–59, 63 | Features, training, model registry, optimizer, prompts, copilot and its tools (incl. the read-only AI director), the autopilot analyst |
+| `ai` | 52–59, 63 | Features, training, model registry, optimizer, prompts, copilot and its tools (incl. the read-only AI director), the autopilot analyst, the AI research desk |
+| `forecast` | — | Kronos forecasts (model code vendored from shiyu-coder/Kronos, MIT) and their forward scorecard |
 | `api` | 80 | `/api/v1` REST resources with problem-details errors; serves the web UI |
 
 ## Known gaps
@@ -369,6 +383,8 @@ Autopilot settings (universe, budget, bar size, stops, capital protection, charg
 - The NSE holiday list is not bundled; add holidays to the calendar, or cycles simply find no new bars on those days.
 - Fyers endpoints follow the official `fyers-apiv3` SDK, OANDA the official `v20-python` SDK, Zerodha `pykiteconnect`, Upstox `upstox-python-sdk`, Angel One `smartapi-python`, Dhan `dhanhq`, Delta Exchange `delta-rest-client`, and the NVIDIA analyst NVIDIA's OpenAI-compatible API. All were verified against simulated servers, because the brokers' hosts and integrate.api.nvidia.com are unreachable from the build environment. Place a small test order on each new broker before arming it.
 - The strategy lab turns text into validated rules and runs those, not Python code written by the AI: code from a model runs with the platform's broker keys, so one wrong or manipulated answer could do anything. The Python view is generated from the rules for reading. Kimi K3's request options (`reasoning_effort`) follow NVIDIA's model listing, not a live test; if a model rejects an option, the request is retried once with only the essentials.
+- CCXT exchanges were verified against CCXT's own exchange classes with their network calls replaced, not against live exchanges; CCXT cannot tell whether an API key can withdraw, so create trading-only keys. Bitbns publishes no candles through CCXT, so its charts build from live prices.
+- Kronos and the research desk were checked with a tiny randomly initialised Kronos model and a scripted model server; the real weights (Hugging Face) and NVIDIA's API are unreachable from the build environment. Neither has a track record yet: their scorecards start empty.
 - MCX and currency futures are supported through Fyers only; the other Indian brokers trade NSE stocks and ETFs.
 - The WebSocket feeds and the Kotak Neo adapter follow the brokers' official SDKs (`dhanhq`, `fyers-apiv3`, `kotakneoapi`) and were verified against local servers speaking those wire formats, not against the brokers themselves. Kotak Neo's REST quote format is not published, so its quotes are parsed on a best-effort basis and it supplies no candle history (use another broker for history).
 - Order flow is estimated: trades are inferred from volume changes between book updates, so small trades between snapshots merge, and no feed identifies participants. Wall and flow events describe displayed quotes and trades; they are not evidence of anyone's intent.

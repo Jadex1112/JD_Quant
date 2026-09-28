@@ -412,3 +412,37 @@ def delete_replay(
     replay_id: str, request: Request, principal: Principal = Depends(require("marketdata:view"))
 ):
     _intel(request).replay.delete(replay_id)
+
+
+# ---- options payoff lab -------------------------------------------------------------------------------
+
+
+class PayoffIn(BaseModel):
+    legs: list[dict[str, Any]] = Field(min_length=1, max_length=12)
+    spot: float = Field(gt=0)
+    range_pct: float = Field(default=20, gt=1, le=80)
+
+
+class PresetIn(BaseModel):
+    name: str
+    spot: float = Field(gt=0)
+    step: float = Field(gt=0)
+    lots: float = Field(default=1, gt=0)
+    days: float = Field(default=7, gt=0, le=730)
+    iv: float = Field(default=15, gt=0, le=300)  # percent
+
+
+@router.post("/payoff")
+def payoff(body: PayoffIn, principal: Principal = Depends(require("marketdata:view"))) -> dict[str, Any]:
+    from jdquant.intelligence.payoff import analyze
+
+    return analyze(body.legs, body.spot, range_pct=body.range_pct)
+
+
+@router.post("/payoff/preset")
+def payoff_preset(
+    body: PresetIn, principal: Principal = Depends(require("marketdata:view"))
+) -> dict[str, Any]:
+    from jdquant.intelligence.payoff import preset
+
+    return {"legs": preset(body.name, body.spot, body.step, lots=body.lots, days=body.days, iv=body.iv / 100)}

@@ -11,7 +11,7 @@ from fastapi.responses import RedirectResponse
 from jdquant.api.deps import ctx, locked, require
 from jdquant.api.schemas import BrokerLoginOut, ConnectionIn, ConnectionOut, CredentialsIn, PinIn, WatchlistIn
 from jdquant.connectivity.base import Environment
-from jdquant.connectivity.connections import ADAPTERS, Connection, ConnectionManager, markets_of
+from jdquant.connectivity.connections import Connection, ConnectionManager, adapter_class, markets_of
 from jdquant.core.errors import PlatformError, ValidationError
 from jdquant.security.identity import Principal
 
@@ -37,7 +37,7 @@ def connection_out(c: Connection) -> ConnectionOut:
         instrument_count=c.instrument_count,
         watchlist=c.watchlist,
         settings=c.settings,
-        requires_login=bool(getattr(ADAPTERS.get(c.venue), "requires_login", False)),
+        requires_login=bool(getattr(adapter_class(c.venue), "requires_login", False)),
         session_expires_at=c.session_expires_at,
         markets=list(markets_of(c.venue)),
     )
@@ -56,6 +56,24 @@ def _audit(request: Request, principal: Principal, action: str, target: str, **d
     ctx(request).audit.record(
         actor=principal.user_id, action=action, category="CONFIGURATION", target=target, data=data
     )
+
+
+_CCXT_CACHE: list | None = None
+
+
+@router.get("/connections/ccxt-exchanges")
+def ccxt_exchanges(principal: Principal = Depends(require("connection:view"))) -> dict:
+    """Crypto exchanges available through CCXT (Indian ones first), or why CCXT is unavailable."""
+    global _CCXT_CACHE
+    from jdquant.connectivity.base import VenueError
+    from jdquant.connectivity.ccxt_adapter import exchanges
+
+    if _CCXT_CACHE is None:
+        try:
+            _CCXT_CACHE = exchanges()
+        except VenueError as exc:
+            return {"available": False, "message": exc.message, "exchanges": []}
+    return {"available": True, "exchanges": _CCXT_CACHE}
 
 
 @router.get("/connections", response_model=list[ConnectionOut])

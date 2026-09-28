@@ -17,6 +17,8 @@ from jdquant.connectivity.alpaca import AlpacaAdapter
 from jdquant.connectivity.angelone import AngelOneAdapter
 from jdquant.connectivity.base import Environment, VenueAdapter, VenueError, VenueTimeout
 from jdquant.connectivity.binance import BinanceSpotAdapter
+from jdquant.connectivity.ccxt_adapter import PREFIX as CCXT_PREFIX
+from jdquant.connectivity.ccxt_adapter import CcxtAdapter
 from jdquant.connectivity.delta import DeltaAdapter
 from jdquant.connectivity.dhan import DhanAdapter
 from jdquant.connectivity.fyers import FyersAdapter
@@ -49,8 +51,17 @@ ADAPTERS: dict[str, type[VenueAdapter]] = {
 LOGIN_STATE_TTL = timedelta(minutes=15)
 
 
+def adapter_class(venue: str) -> type[VenueAdapter] | None:
+    """The adapter for a connection venue; `CCXT_<EXCHANGE>` venues share the CCXT adapter."""
+    if venue.startswith(CCXT_PREFIX):
+        return CcxtAdapter
+    return ADAPTERS.get(venue)
+
+
 def markets_of(venue: str) -> tuple[str, ...]:
     """Instrument venues reachable through a connection to `venue` (a broker may front an exchange)."""
+    if venue.startswith(CCXT_PREFIX):
+        return (venue[len(CCXT_PREFIX) :],)
     adapter = ADAPTERS.get(venue)
     return (adapter.markets or (venue,)) if adapter else (venue,)
 
@@ -115,9 +126,10 @@ class ConnectionManager:
         settings: dict[str, Any] | None = None,
     ) -> Connection:
         venue = venue.upper()
-        if venue not in ADAPTERS:
+        if adapter_class(venue) is None:
             raise ValidationError(
-                "VENUE_UNSUPPORTED", [{"field": "venue", "message": f"one of {sorted(ADAPTERS)}"}]
+                "VENUE_UNSUPPORTED",
+                [{"field": "venue", "message": f"one of {sorted(ADAPTERS)} or CCXT_<exchange>"}],
             )
         if bool(api_key) != bool(api_secret):
             raise ValidationError(
@@ -364,7 +376,13 @@ class ConnectionManager:
     def _build(self, connection: Connection, key: str | None, secret: str | None) -> VenueAdapter:
         http = self._http_factory(connection.venue) if self._http_factory else None
         options: dict[str, Any] = {}
-        if connection.venue == "FYERS" or getattr(ADAPTERS[connection.venue], "uses_product", False):
+        cls = adapter_class(connection.venue)
+        if getattr(cls, "uses_settings", False):
+            options["settings"] = {
+                **connection.settings,
+                "exchange": connection.venue[len(CCXT_PREFIX) :].lower(),
+            }
+        if connection.venue == "FYERS" or getattr(cls, "uses_product", False):
             from jdquant.markets.india import Product
 
             try:
@@ -374,7 +392,7 @@ class ConnectionManager:
                     "PRODUCT_INVALID", [{"field": "product", "message": "CNC or INTRADAY"}]
                 ) from None
         try:
-            return ADAPTERS[connection.venue](
+            return cls(
                 self._platform.clock,
                 api_key=key,
                 api_secret=secret,
