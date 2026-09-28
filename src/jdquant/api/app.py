@@ -23,6 +23,7 @@ from jdquant.api.routes import (
     lab,
     market,
     research,
+    strategies,
     trading,
 )
 from jdquant.core.errors import NotFoundError, PlatformError, ValidationError
@@ -148,6 +149,7 @@ def create_app(
         lab,
         intelligence,
         automation,
+        strategies,
     ):
         app.include_router(module.router)
     _mount_web(app, c.settings.web_dir or WEB_DIST)

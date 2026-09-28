@@ -197,6 +197,7 @@ def _attach_automation(platform, store, services, connections, runner, intellige
 
     from jdquant.risk.circuit import CircuitBreakers
     from jdquant.risk.guards import TradingGuards
+    from jdquant.strategy.registry import StrategyRegistry
     from jdquant.trading.execution import ExecutionMonitor
     from jdquant.trading.journal import TradeJournal
     from jdquant.trading.signals import SignalLog
@@ -250,3 +251,6 @@ def _attach_automation(platform, store, services, connections, runner, intellige
     intelligence.periodic += [("circuit", 10, circuit.tick), ("reconcile", 60, circuit.reconcile)]
     runner.features = intelligence.features
     services.update(journal=journal, signals=signals, execution=execution, guards=guards, circuit=circuit)
+    services["registry"] = StrategyRegistry(
+        store, platform, candles=services["autopilot"]._venue_candles, journal=journal, runner=runner
+    )

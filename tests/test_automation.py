@@ -5,33 +5,15 @@ from datetime import timedelta
 from decimal import Decimal
 
 import pytest
-from conftest import BTC, OWNER, T0, advance, market, set_quote
-from fastapi.testclient import TestClient
+from conftest import BTC, T0, advance, market, set_quote
 
-from jdquant.api.app import create_app
-from jdquant.api.context import Settings
-from jdquant.core.clock import SimulatedClock
 from jdquant.core.events import Event
 from jdquant.core.types import Side
 from jdquant.marketdata.book import BookSnapshot, Level
 from jdquant.oms.orders import OrderRequest, OrderSource, OrderStatus, OrderType
-from jdquant.platform import PAPER_ACCOUNT_ID, build_paper_platform
+from jdquant.platform import PAPER_ACCOUNT_ID
 from jdquant.strategy.exits import ExitManager, ExitPlan
 from jdquant.trading.engine import AccountMode, KillSwitchScope, TradingAccount
-
-
-@pytest.fixture
-def app_ctx():
-    clock = SimulatedClock(T0)
-    platform = build_paper_platform(clock)
-    set_quote(platform, BTC, "49999", "50001")
-    app = create_app(platform, settings=Settings(enforce_mfa_for_privileged=False, demo_feed=True))
-    client = TestClient(app)
-    assert client.post("/api/v1/setup", json=OWNER).status_code == 201
-    token = client.post("/api/v1/auth/login", json={"email": OWNER["email"], "password": OWNER["password"]})
-    client.cookies.clear()
-    client.headers["Authorization"] = f"Bearer {token.json()['token']}"
-    return client, app.state.ctx, platform, clock
 
 
 def _deployment(platform, strategy="ma_crossover", account=PAPER_ACCOUNT_ID):

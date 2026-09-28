@@ -65,3 +65,23 @@ def login_client(platform, *, enforce_mfa: bool = False):
     client.cookies.clear()
     client.headers["Authorization"] = f"Bearer {token.json()['token']}"
     return client
+
+
+@pytest.fixture
+def app_ctx():
+    """Owner-authenticated API client with the demo feed: (client, context, platform, clock)."""
+    from fastapi.testclient import TestClient
+
+    from jdquant.api.app import create_app
+    from jdquant.api.context import Settings
+
+    clock = SimulatedClock(T0)
+    platform = build_paper_platform(clock)
+    set_quote(platform, BTC, "49999", "50001")
+    app = create_app(platform, settings=Settings(enforce_mfa_for_privileged=False, demo_feed=True))
+    client = TestClient(app)
+    assert client.post("/api/v1/setup", json=OWNER).status_code == 201
+    token = client.post("/api/v1/auth/login", json={"email": OWNER["email"], "password": OWNER["password"]})
+    client.cookies.clear()
+    client.headers["Authorization"] = f"Bearer {token.json()['token']}"
+    return client, app.state.ctx, platform, clock

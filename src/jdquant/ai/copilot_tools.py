@@ -272,7 +272,9 @@ def build_tools(ctx) -> list[CopilotTool]:
         return {"kill_switch_id": switch.kill_switch_id, "scope": switch.scope, "action": switch.action}
 
     RO, SC = Effect.READ_ONLY, Effect.STATE_CHANGING
-    return [
+    from jdquant.ai.director_tools import build_director_tools
+
+    return build_director_tools(ctx) + [
         CopilotTool(
             "get_positions",
             "Open positions with P&L, optionally for one account.",
