@@ -214,6 +214,19 @@ class KiteAdapter(IndianCashBroker):
             instrument.instrument_id, at, bid, d(buys[0].get("quantity")), ask, d(sells[0].get("quantity"))
         )
 
+    def fetch_positions(self):
+        """Net day/carry positions plus demat holdings (including T+1 shares)."""
+        refs = self.by_ref(0)
+        out: dict = {}
+        for p in (self._call("GET", "/portfolio/positions") or {}).get("net") or []:
+            if p.get("exchange") == "NSE":
+                self.add_quantity(out, refs.get(p.get("tradingsymbol")), p.get("quantity"))
+        for h in self._call("GET", "/portfolio/holdings") or []:
+            if h.get("exchange") in ("NSE", None):
+                iid = refs.get(h.get("tradingsymbol"))
+                self.add_quantity(out, iid, (h.get("quantity") or 0) + (h.get("t1_quantity") or 0))
+        return out
+
     def fetch_snapshots(self, instruments: list[Instrument]) -> dict[str, dict]:
         out = {}
         for batch in chunks(instruments, 250):

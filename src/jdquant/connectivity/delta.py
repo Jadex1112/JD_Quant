@@ -237,6 +237,13 @@ class DeltaAdapter(VenueAdapter):
             instrument.instrument_id, at, bid, _d(quotes.get("bid_size")), ask, _d(quotes.get("ask_size"))
         )
 
+    def fetch_positions(self):
+        out = {}
+        for p in self._request("GET", "/v2/positions/margined", auth=True) or []:
+            if p.get("product_symbol"):
+                out[f"DELTA:{p['product_symbol']}"] = _d(p.get("size", 0))
+        return out
+
     def fetch_depth(self, instrument: Instrument):
         """The L2 book in contracts (each contract is `contract_multiplier` of the coin)."""
         book = self._request("GET", f"/v2/l2orderbook/{instrument.symbol}") or {}

@@ -134,6 +134,12 @@ def _autopilot() -> tuple[type[Strategy], ...]:
     return AutopilotStrategy, RotationStrategy, AiTraderStrategy, RuleStrategy
 
 
+def _flow() -> tuple[type[Strategy], ...]:
+    from jdquant.strategy.flow import LiquidityWallBounce, OrderFlowMomentum, VwapReclaim
+
+    return VwapReclaim, OrderFlowMomentum, LiquidityWallBounce
+
+
 TEMPLATES: dict[str, type[Strategy]] = {
     cls.name: cls
     for cls in (
@@ -143,5 +149,6 @@ TEMPLATES: dict[str, type[Strategy]] = {
         DonchianBreakout,
         MlSignal,
         *_autopilot(),
+        *_flow(),
     )
 }

@@ -297,6 +297,21 @@ class KotakNeoAdapter(IndianCashBroker):
                     out[by_token[token]] = stats
         return out
 
+    def fetch_positions(self):
+        """Day and carried-forward positions (net of buys and sells). Demat holdings are not included."""
+        refs = self.by_ref(0)
+        out: dict = {}
+        for p in self._call("GET", "/quick/user/positions").get("data") or []:
+            if not isinstance(p, dict):
+                continue
+            iid = refs.get(str(p.get("trdSym") or p.get("sym") or ""))
+            net = sum(
+                int(float(p.get(k) or 0)) * s
+                for k, s in (("flBuyQty", 1), ("cfBuyQty", 1), ("flSellQty", -1), ("cfSellQty", -1))
+            )
+            self.add_quantity(out, iid, net)
+        return out
+
     def fetch_candles(self, instrument: Instrument, interval_seconds: int, limit: int) -> list[Candle]:
         raise VenueError(
             "INTERVAL_UNSUPPORTED",

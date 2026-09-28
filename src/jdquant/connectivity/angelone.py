@@ -206,6 +206,17 @@ class AngelOneAdapter(IndianCashBroker):
         )
         return next(iter(data.get("fetched") or []), {})
 
+    def fetch_positions(self):
+        refs = self.by_ref(1)
+        out: dict = {}
+        for p in self._call(f"{BASE}/order/v1/getPosition", method="GET") or []:
+            if p.get("exchange") in ("NSE", None):
+                self.add_quantity(out, refs.get(str(p.get("symboltoken"))), p.get("netqty"))
+        for h in self._call(f"{BASE}/portfolio/v1/getHolding", method="GET") or []:
+            iid = refs.get(str(h.get("symboltoken")))
+            self.add_quantity(out, iid, int(h.get("quantity") or 0) + int(h.get("t1quantity") or 0))
+        return out
+
     def fetch_snapshots(self, instruments: list[Instrument]) -> dict[str, dict]:
         out = {}
         for batch in chunks(instruments, 50):

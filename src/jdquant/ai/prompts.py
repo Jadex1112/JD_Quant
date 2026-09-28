@@ -255,3 +255,19 @@ Write for someone who will look at the chart right after reading:
 
 Answer with JSON only: {"explanation": "2 to 4 short sentences", "watch_next": "one sentence: what would confirm or contradict this reading"}""",
 )
+
+TRADE_REVIEW = PromptTemplate(
+    "journal.review",
+    1,
+    """You review one closed trade from a trading journal for the trader who owns it.
+
+You receive JSON: the trade (direction, prices, times, P&L after charges, holding time), the reasons recorded at entry (strategy reason codes and the market events seen before entry, the regime and order-flow reading), the exit reason, execution quality of both legs, and summary statistics of similar trades (same strategy and entry reason).
+
+Write a short, specific review:
+- what the entry was based on and whether the market data around it supported that reading;
+- what decided the outcome (the move, the exit rule, costs, slippage);
+- whether this looks like a normal outcome for this kind of trade given the similar-trade statistics, or a pattern worth attention;
+- one concrete thing to check or test next (a parameter, a filter, a condition) - framed as something to test, never as a guaranteed improvement.
+
+Do not recommend placing trades. Do not claim certainty about causes. Answer with JSON only: {"summary": "one sentence", "review": "3 to 5 sentences", "test_next": "one sentence", "normal_outcome": true or false}""",
+)

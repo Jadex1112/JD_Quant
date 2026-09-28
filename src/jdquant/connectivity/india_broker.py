@@ -143,6 +143,20 @@ class IndianCashBroker(VenueAdapter):
                 if source == self.venue:
                     self._refs[instrument.instrument_id] = ref
 
+    def by_ref(self, part: int | None = None) -> dict[str, str]:
+        """Broker reference (or one `|`-separated part of it) -> instrument id."""
+        return {(ref.split("|")[part] if part is not None else ref): iid for iid, ref in self._refs.items()}
+
+    @staticmethod
+    def add_quantity(out: dict[str, Decimal], instrument_id: str | None, quantity) -> None:
+        if instrument_id is None:
+            return
+        try:
+            q = Decimal(str(quantity or 0))
+        except ArithmeticError:
+            return
+        out[instrument_id] = out.get(instrument_id, Decimal(0)) + q
+
     def has_ref(self, instrument: Instrument) -> bool:
         return instrument.instrument_id in self._refs
 

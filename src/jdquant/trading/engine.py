@@ -166,6 +166,9 @@ class TradingEngine:
         self.kill_switches: dict[str, KillSwitch] = {}
         self.maintenance_mode = False
         self.mode = PlatformMode.NORMAL
+        # Further guards (duplicate orders, corporate events, expected slippage...): each returns a
+        # blocking reason code or None. They see every non-system order after the built-in checks.
+        self.extra_checks: list = []
         bus.subscribe("risk.breach.detected", self._on_risk_breach)
         bus.subscribe("position.updated", self._on_position_updated)
 
@@ -504,4 +507,8 @@ class TradingEngine:
                 return "DEPLOYMENT_NOT_RUNNING"
             if order.instrument_id not in deployment.instruments:
                 return "INSTRUMENT_NOT_IN_UNIVERSE"
+        for check in self.extra_checks:
+            reason = check(order)
+            if reason:
+                return reason
         return None

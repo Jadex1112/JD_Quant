@@ -16,6 +16,7 @@ from jdquant.api.routes import (
     admin,
     ai,
     auth,
+    automation,
     autopilot,
     connections,
     intelligence,
@@ -135,7 +136,19 @@ def create_app(
             "maintenance_mode": trading_engine.maintenance_mode,
         }
 
-    for module in (auth, admin, trading, research, connections, ai, autopilot, market, lab, intelligence):
+    for module in (
+        auth,
+        admin,
+        trading,
+        research,
+        connections,
+        ai,
+        autopilot,
+        market,
+        lab,
+        intelligence,
+        automation,
+    ):
         app.include_router(module.router)
     _mount_web(app, c.settings.web_dir or WEB_DIST)
     return app

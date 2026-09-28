@@ -200,6 +200,10 @@ class VenueAdapter(ABC):
         """The visible order book over REST, where the venue publishes one (None otherwise)."""
         return None
 
+    def fetch_positions(self) -> dict[str, Decimal] | None:
+        """Net quantity held at the broker per instrument (positions plus holdings); None when unsupported."""
+        return None
+
     def option_underlyings(self) -> tuple[str, ...]:
         """Underlyings whose option chains this venue can supply (e.g. NIFTY); empty when none."""
         return ()

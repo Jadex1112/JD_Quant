@@ -200,6 +200,12 @@ class AlpacaAdapter(VenueAdapter):
                 )
         return candles[-limit:]
 
+    def fetch_positions(self):
+        return {
+            f"ALPACA:{p['symbol']}": _d(p.get("qty", 0))
+            for p in self._request("GET", f"{self._base}/v2/positions") or []
+        }
+
     def fetch_balances(self) -> list[Balance]:
         return self.test_connection().balances
 

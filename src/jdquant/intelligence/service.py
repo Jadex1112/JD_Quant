@@ -162,6 +162,7 @@ class MarketIntelligence:
         self.streaming_enabled = True
         self.deep_depth: list[str] = []
         self.feeds = None  # connectivity.feeds.manager.FeedManager, attached by the app
+        self.periodic: list[tuple[str, float, Any]] = []  # (name, seconds, fn): extra periodic work
         self._analysis: dict[str, dict[str, Any]] = {}
         self._history: dict[str, tuple[datetime, list[PriceBar]]] = {}
         self._daily: dict[str, tuple[date, list[PriceBar]]] = {}
@@ -185,6 +186,18 @@ class MarketIntelligence:
             self.simulated = SimulatedDepthFeed(
                 self.hub.publish, self._simulated_instruments, self._start_price, clock.now
             )
+        from jdquant.intelligence.news import NewsDesk
+        from jdquant.intelligence.replay import ReplayManager
+
+        self.news = NewsDesk(
+            store,
+            self.events,
+            self.event_store,
+            instruments=platform.instruments.all,
+            bars=lambda iid: self.minute_bars(iid)[0],
+            now=clock.now,
+        )
+        self.replay = ReplayManager(self.recorder, self.event_store, self.instrument)
         self.events.listeners.append(self._on_event)
         platform.bus.subscribe("order.state.changed", self._on_order_state)
         self._load()
@@ -302,6 +315,42 @@ class MarketIntelligence:
             return f"{instrument.venue}:{instrument.underlying}"
         return None
 
+    def features(self, instrument_id: str) -> dict[str, Any]:
+        """Live features for strategies (order flow, walls, VWAP, recent events)."""
+        from jdquant.intelligence import features
+
+        instrument = self.instrument(instrument_id)
+        if instrument is None:
+            return {}
+        return features.build(
+            instrument,
+            flow=self.flow,
+            orderbook=self.orderbook,
+            events=self.events,
+            book=self.hub.book(instrument_id),
+            now=self.clock.now(),
+        )
+
+    def trade_context(self, instrument_id: str, at: datetime) -> dict[str, Any]:
+        """What the engines saw when a trade was opened, for the journal."""
+        analysis = self._analysis.get(instrument_id) or {}
+        flow = self.flow.snapshot(instrument_id) or {}
+        vw = (analysis.get("vwap") or {}).get("vwap") or flow.get("vwap")
+        price = flow.get("last_price") or analysis.get("last")
+        before = [
+            e.kind
+            for e in self.events.recent(instrument_id, 50)
+            if timedelta(0) <= at - e.at <= timedelta(minutes=10)
+        ]
+        return {
+            "regime": (analysis.get("regime") or {}).get("state"),
+            "trend": (analysis.get("regime") or {}).get("trend"),
+            "events_before": sorted(set(before)),
+            "delta_5m": flow.get("delta_5m"),
+            "imbalance": flow.get("imbalance_top5"),
+            "vs_vwap": None if not (vw and price) else ("ABOVE" if price > vw else "BELOW"),
+        }
+
     def depth_watched(self) -> list[str]:
         return list(self.watch)
 
@@ -387,6 +436,19 @@ class MarketIntelligence:
                     log.warning("option chain for %s failed: %s", underlying, exc)
         if (force or self._due("scanner", 60)) and self.scanner_enabled and self.scanner_universe:
             self.scanner.run(self.scanner_universe)
+        if (force or self._due("news", 300)) and self.news.feeds:
+            try:
+                self.news.poll()
+            except Exception:
+                log.exception("news poll failed")
+        if force or self._due("corporate", 60):
+            self.news.raise_due()
+        for name, seconds, fn in list(self.periodic):
+            if force or self._due(name, seconds):
+                try:
+                    fn()
+                except Exception:
+                    log.exception("%s failed", name)
         if force or self._due("daily", 20):
             self._warm_daily(limit=10 if not force else 1000)
         self._explain_pending()

@@ -406,6 +406,18 @@ class FyersAdapter(VenueAdapter):
             return Quote(instrument.instrument_id, at, bid, Decimal(0), ask, Decimal(0))
         return None
 
+    def fetch_positions(self):
+        out: dict[str, Decimal] = {}
+        for p in self._request("GET", f"{API}/positions").get("netPositions") or []:
+            sym = p.get("symbol")
+            if sym:
+                out[sym] = out.get(sym, Decimal(0)) + Decimal(str(p.get("netQty") or 0))
+        for h in self._request("GET", f"{API}/holdings").get("holdings") or []:
+            sym = h.get("symbol")
+            if sym:
+                out[sym] = out.get(sym, Decimal(0)) + Decimal(str(h.get("quantity") or 0))
+        return out
+
     def option_underlyings(self) -> tuple[str, ...]:
         return tuple(FYERS_INDEX_SYMBOLS)
 

@@ -262,3 +262,153 @@ def quality(
 def recordings(request: Request, principal: Principal = Depends(require("marketdata:view"))):
     intel = _intel(request)
     return {"settings": intel.recorder.settings(), "coverage": intel.recorder.coverage()}
+
+
+# ---- news and corporate events ------------------------------------------------------------------------
+
+
+class NewsIn(BaseModel):
+    headline: str = Field(min_length=3, max_length=500)
+    url: str = Field(default="", max_length=1000)
+    summary: str = Field(default="", max_length=2000)
+    source: str = Field(default="manual", max_length=100)
+    at: datetime | None = None
+    instruments: list[str] = Field(default_factory=list)
+
+
+class NewsSettingsIn(BaseModel):
+    feeds: list[str] | None = None
+    block_mode: str | None = None
+
+
+class CorporateIn(BaseModel):
+    instrument_id: str
+    kind: str
+    day: date
+    details: str = Field(default="", max_length=500)
+
+
+class CsvIn(BaseModel):
+    csv: str = Field(max_length=200_000)
+
+
+@router.get("/news")
+def news(
+    request: Request,
+    instrument_id: str | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    principal: Principal = Depends(require("marketdata:view")),
+):
+    desk = _intel(request).news
+    return {"settings": desk.settings(), "items": desk.list(instrument_id, limit)}
+
+
+@router.post("/news", status_code=201)
+def add_news(body: NewsIn, request: Request, principal: Principal = Depends(require("marketdata:import"))):
+    item = _intel(request).news.ingest(
+        body.headline,
+        source=body.source,
+        url=body.url,
+        summary=body.summary,
+        at=body.at,
+        instruments=body.instruments,
+    )
+    return item.to_dict()
+
+
+@router.put("/news/settings")
+def news_settings(
+    body: NewsSettingsIn, request: Request, principal: Principal = Depends(require("marketdata:subscribe"))
+):
+    result = _intel(request).news.configure(feeds=body.feeds, block_mode=body.block_mode)
+    ctx(request).audit.record(
+        actor=principal.user_id,
+        action="intelligence.news_settings",
+        category="CONFIGURATION",
+        data=body.model_dump(exclude_none=True),
+    )
+    return result
+
+
+@router.post("/news/poll")
+def poll_news(request: Request, principal: Principal = Depends(require("marketdata:subscribe"))):
+    return {"added": _intel(request).news.poll(), "settings": _intel(request).news.settings()}
+
+
+@router.get("/news/{news_id}/reaction")
+def news_reaction(news_id: str, request: Request, principal: Principal = Depends(require("marketdata:view"))):
+    return _intel(request).news.reaction(news_id)
+
+
+@router.get("/corporate-events")
+def corporate(
+    request: Request,
+    days: int = Query(default=30, ge=0, le=365),
+    instrument_id: str | None = None,
+    principal: Principal = Depends(require("marketdata:view")),
+):
+    return _intel(request).news.corporate(days=days, instrument_id=instrument_id)
+
+
+@router.post("/corporate-events", status_code=201)
+def add_corporate(
+    body: CorporateIn, request: Request, principal: Principal = Depends(require("marketdata:import"))
+):
+    return (
+        _intel(request)
+        .news.add_corporate(body.instrument_id, body.kind.upper(), body.day, body.details)
+        .to_dict()
+    )
+
+
+@router.post("/corporate-events/import")
+def import_corporate(
+    body: CsvIn, request: Request, principal: Principal = Depends(require("marketdata:import"))
+):
+    return _intel(request).news.import_csv(body.csv)
+
+
+@router.delete("/corporate-events/{event_id}", status_code=204)
+def delete_corporate(
+    event_id: str, request: Request, principal: Principal = Depends(require("marketdata:import"))
+):
+    _intel(request).news.delete_corporate(event_id)
+
+
+# ---- replay -------------------------------------------------------------------------------------------
+
+
+class ReplayIn(BaseModel):
+    instrument_id: str
+    start: datetime
+    end: datetime
+
+
+@router.post("/replays", status_code=201)
+def create_replay(
+    body: ReplayIn, request: Request, principal: Principal = Depends(require("marketdata:view"))
+):
+    return _intel(request).replay.create(body.instrument_id, body.start, body.end)
+
+
+@router.get("/replays/{replay_id}")
+def replay_info(replay_id: str, request: Request, principal: Principal = Depends(require("marketdata:view"))):
+    return _intel(request).replay.get(replay_id).info()
+
+
+@router.get("/replays/{replay_id}/frame")
+def replay_frame(
+    replay_id: str,
+    at: datetime,
+    request: Request,
+    levels: int = Query(default=20, ge=1, le=200),
+    principal: Principal = Depends(require("marketdata:view")),
+):
+    return _intel(request).replay.get(replay_id).frame(at, levels)
+
+
+@router.delete("/replays/{replay_id}", status_code=204)
+def delete_replay(
+    replay_id: str, request: Request, principal: Principal = Depends(require("marketdata:view"))
+):
+    _intel(request).replay.delete(replay_id)

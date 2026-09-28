@@ -113,6 +113,37 @@ class StrategyContext:
         self.logger = logging.getLogger(f"jdquant.strategy.{deployment_id}")
         # Optional check on orders that open a position (the AI trade monitor): returns False to hold one.
         self.entry_gate: Any = None
+        # Live market-intelligence features (order flow, walls, VWAP...) when the platform provides them.
+        self.features_source: Any = None
+        from jdquant.strategy.exits import ExitManager
+
+        self.exits = ExitManager()
+        self._explain: dict[str, Any] = {}
+
+    def explain(
+        self,
+        *reasons: str,
+        confidence: float | None = None,
+        stop: Any = None,
+        target: Any = None,
+        exit_reason: str | None = None,
+    ) -> None:
+        """State why the next order is sent; it is tagged on the order and kept in the signal log."""
+        self._explain = {
+            "reasons": ",".join(r for r in reasons if r),
+            "confidence": None if confidence is None else f"{confidence:.4f}",
+            "stop": None if stop is None else str(stop),
+            "target": None if target is None else str(target),
+            "exit_reason": exit_reason,
+        }
+
+    def features(self, instrument_id: str) -> dict[str, Any]:
+        if self.features_source is None:
+            return {}
+        try:
+            return self.features_source(instrument_id) or {}
+        except Exception:
+            return {}
 
     def predict(self, model: str, instrument_id: str) -> float:
         """Score the latest closed bar with the model's PRODUCTION version (Chapter 59)."""
@@ -179,6 +210,10 @@ class StrategyContext:
     def _submit(
         self, instrument_id: str, side: Side, quantity: Decimal, limit_price: Decimal | None, **kw: Any
     ) -> Order | None:
+        tags = {k: v for k, v in self._explain.items() if v}
+        self._explain = {}
+        if tags:
+            kw["tags"] = {**tags, **kw.get("tags", {})}
         request = OrderRequest(
             account_id=self.account_id,
             instrument_id=instrument_id,

@@ -124,11 +124,12 @@ class AutopilotConfig:
     roll_days: int = 3  # roll futures this many days before expiry
     # INR per unit of other quote currencies, to size crypto in USDT from an INR budget. Update as rates move.
     fx_rates: dict[str, Decimal] = field(default_factory=lambda: dict(DEFAULT_FX))
-    # Who takes trades. "ai": the AI decides each minute, choosing among the live signals of the
-    # strategies that passed walk-forward testing (never a direction none of them holds). "strategies":
-    # each instrument's best tested strategy trades on its own and the AI reviews. Without a configured
-    # AI model the strategies trade on their own.
-    decision_mode: str = "ai"
+    # Who takes trades. "strategies" (default): each instrument's best tested strategy decides by its
+    # explicit rules, the risk engine can veto, and the AI analyses and advises. "ai" (opt-in): the AI
+    # chooses each minute among the live signals of the strategies that passed walk-forward testing
+    # (never a direction none of them holds), under the same risk limits. Without an AI model the
+    # strategies always trade on their own.
+    decision_mode: str = "strategies"
     panel_size: int = 5  # tested strategies whose signals the AI weighs per instrument
     # AI trade monitor: an LLM reviews every open autopilot position and proposed entry each minute.
     monitor_enabled: bool = True

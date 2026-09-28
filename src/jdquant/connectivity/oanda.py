@@ -197,6 +197,14 @@ class OandaAdapter(VenueAdapter):
             _d(ask.get("liquidity", 0)),
         )
 
+    def fetch_positions(self):
+        _, data = self._request("GET", self._account_path("/openPositions"))
+        out = {}
+        for p in data.get("positions") or []:
+            units = _d((p.get("long") or {}).get("units", 0)) + _d((p.get("short") or {}).get("units", 0))
+            out[f"OANDA:{p['instrument']}"] = units
+        return out
+
     def fetch_depth(self, instrument: Instrument):
         """OANDA quotes several prices per side, each good for a stated liquidity (units)."""
         _, data = self._request(

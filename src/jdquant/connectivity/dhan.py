@@ -153,6 +153,16 @@ class DhanAdapter(IndianCashBroker):
         body = self._call("POST", "/marketfeed/quote", {"NSE_EQ": [int(security_id)]}) or {}
         return ((body.get("data") or {}).get("NSE_EQ") or {}).get(security_id) or {}
 
+    def fetch_positions(self):
+        refs = self.by_ref()
+        out: dict = {}
+        for p in self._call("GET", "/positions") or []:
+            if p.get("exchangeSegment") in ("NSE_EQ", None):
+                self.add_quantity(out, refs.get(str(p.get("securityId"))), p.get("netQty"))
+        for h in self._call("GET", "/holdings") or []:
+            self.add_quantity(out, refs.get(str(h.get("securityId"))), h.get("totalQty"))
+        return out
+
     def option_underlyings(self) -> tuple[str, ...]:
         return tuple(DHAN_INDICES)
 

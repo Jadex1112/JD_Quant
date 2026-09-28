@@ -18,6 +18,7 @@ def _setup(mistake="wide_spread"):
     h.platform.market.listeners.append(live.on_quote)
     chat = FakeChat(lambda kind, item: ("LONG", 0.9), mistake=mistake)
     monitor = TradeMonitor(h.autopilot, chat, live=live)
+    h.autopilot.update_config({"decision_mode": "ai"}, "tester")  # opt in: strategies decide by default
     h.autopilot.run_cycle()
     [m] = h.managed()
     for candle in h.series[TREND][-300:]:

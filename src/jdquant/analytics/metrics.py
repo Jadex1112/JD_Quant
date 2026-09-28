@@ -98,7 +98,15 @@ def trade_statistics(pnls: Sequence[Number]) -> dict[str, float | int | None]:
     wins = [p for p in values if p > 0]
     losses = [p for p in values if p < 0]
     gross_profit, gross_loss = sum(wins), -sum(losses)
+    streaks = {"max_consecutive_wins": 0, "max_consecutive_losses": 0}
+    run_wins = run_losses = 0
+    for p in values:
+        run_wins = run_wins + 1 if p > 0 else 0
+        run_losses = run_losses + 1 if p < 0 else 0
+        streaks["max_consecutive_wins"] = max(streaks["max_consecutive_wins"], run_wins)
+        streaks["max_consecutive_losses"] = max(streaks["max_consecutive_losses"], run_losses)
     return {
+        **streaks,
         "trade_count": len(values),
         "win_rate": len(wins) / len(values) if values else None,
         "profit_factor": gross_profit / gross_loss if gross_loss else None,

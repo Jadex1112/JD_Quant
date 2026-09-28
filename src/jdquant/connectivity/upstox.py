@@ -225,6 +225,16 @@ class UpstoxAdapter(IndianCashBroker):
             iter(data.values()), {}
         )
 
+    def fetch_positions(self):
+        refs = self.by_ref()
+        out: dict = {}
+        for p in self._call("GET", f"{API}/v2/portfolio/short-term-positions") or []:
+            self.add_quantity(out, refs.get(p.get("instrument_token")), p.get("quantity"))
+        for h in self._call("GET", f"{API}/v2/portfolio/long-term-holdings") or []:
+            iid = refs.get(h.get("instrument_token"))
+            self.add_quantity(out, iid, (h.get("quantity") or 0) + (h.get("t1_quantity") or 0))
+        return out
+
     def fetch_snapshots(self, instruments: list[Instrument]) -> dict[str, dict]:
         out = {}
         for batch in chunks(instruments, 400):

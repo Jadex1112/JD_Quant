@@ -166,6 +166,7 @@ def build_context(
     )
     services["intelligence"] = intelligence
     intelligence.feeds = FeedManager(connections, intelligence.hub, platform.clock)
+    _attach_automation(platform, store, services, connections, runner, intelligence)
     poller.hub = intelligence.hub
     poller.depth_watched = intelligence.depth_watched
     poller.streamed = intelligence.streamed
@@ -188,3 +189,64 @@ def _venue_candles(connections: ConnectionManager):
             return None
 
     return load
+
+
+def _attach_automation(platform, store, services, connections, runner, intelligence) -> None:
+    """Signals, the trade journal, execution quality, pre-trade guards and circuit breakers."""
+    from decimal import Decimal
+
+    from jdquant.risk.circuit import CircuitBreakers
+    from jdquant.risk.guards import TradingGuards
+    from jdquant.trading.execution import ExecutionMonitor
+    from jdquant.trading.journal import TradeJournal
+    from jdquant.trading.signals import SignalLog
+
+    def deployment_name(deployment_id: str) -> str:
+        deployment = platform.trading.deployments.get(deployment_id)
+        return deployment.strategy_name if deployment else ""
+
+    def venue_of(account_id: str) -> str:
+        adapter = connections.adapter_for_account(account_id)
+        return adapter.venue if adapter is not None else "PAPER"
+
+    def multiplier(instrument_id: str) -> float:
+        try:
+            return float(platform.instruments.get(instrument_id).contract_multiplier)
+        except Exception:
+            return 1.0
+
+    def fx(quote: str, account_currency: str) -> Decimal:
+        if quote == account_currency:
+            return Decimal(1)
+        rates = {**services["autopilot"].fx_rates(), "INR": Decimal(1)}
+        return rates.get(quote, Decimal(1)) / rates.get(account_currency, Decimal(1))
+
+    journal = TradeJournal(
+        store,
+        platform.bus,
+        platform.instruments,
+        context=intelligence.trade_context,
+        deployment_name=deployment_name,
+    )
+    signals = SignalLog(store, platform.bus, platform.risk, deployment_name=deployment_name)
+    execution = ExecutionMonitor(
+        store,
+        platform.bus,
+        platform.market,
+        book=intelligence.hub.book,
+        venue_of=venue_of,
+        multiplier=multiplier,
+    )
+    guards = TradingGuards(
+        store,
+        platform,
+        expected=execution.expected,
+        corporate=intelligence.news.upcoming_for,
+        corporate_mode=lambda: intelligence.news.block_mode,
+        fx_to_account=fx,
+    )
+    platform.trading.extra_checks.append(guards)
+    circuit = CircuitBreakers(platform, store, connections=connections, journal=journal, execution=execution)
+    intelligence.periodic += [("circuit", 10, circuit.tick), ("reconcile", 60, circuit.reconcile)]
+    runner.features = intelligence.features
+    services.update(journal=journal, signals=signals, execution=execution, guards=guards, circuit=circuit)

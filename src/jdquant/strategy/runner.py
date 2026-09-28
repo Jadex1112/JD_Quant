@@ -36,6 +36,7 @@ class DeploymentRunner:
         self.hosted: dict[str, _Hosted] = {}
         self.models = None  # ModelRegistry, attached by the application
         self.entry_gate = None  # e.g. the AI trade monitor, attached by the application
+        self.features = None  # live market-intelligence features per instrument, attached by the application
         self._aggregators: dict[tuple[str, int], CandleAggregator] = {}
 
     def sync(self, deployment: Deployment) -> None:
@@ -73,6 +74,7 @@ class DeploymentRunner:
             history,
         )
         hosted.host.ctx.entry_gate = self.entry_gate
+        hosted.host.ctx.features_source = self.features
         for instrument_id in deployment.instruments:  # warm-up without trading (FR-19014 step 6)
             for candle in self._fetch(instrument_id, deployment.bar_interval_seconds, WARMUP_BARS):
                 history.append(candle)

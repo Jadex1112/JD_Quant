@@ -18,6 +18,7 @@ def _setup(decide=None, fail=False, history=True):
     h = Harness()
     chat = FakeChat(decide or (lambda kind, item: ("LONG" if kind == "trades" else "HOLD", 0.9)), fail)
     monitor = TradeMonitor(h.autopilot, chat)  # attach before research so the AI trader is deployed
+    h.autopilot.update_config({"decision_mode": "ai"}, "tester")  # opt in: strategies decide by default
     h.autopilot.run_cycle()
     [m] = h.managed()
     hosted = h.runner.hosted[m.deployment_id]

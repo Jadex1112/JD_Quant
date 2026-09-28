@@ -157,3 +157,59 @@ def test_api_watch_overview_events_and_options(client):
     assert scan["universe"] == 1
     settings = c.get("/api/v1/intelligence/settings").json()
     assert "WALL_WITHDRAWN" in settings["event_kinds"] and settings["simulated_depth"] is True
+
+
+RSS = """<?xml version="1.0"?><rss version="2.0"><channel><title>Announcements</title>
+<item><title>RELIANCE board approves bonus issue</title><link>https://example.com/a1</link>
+<pubDate>Mon, 05 Jan 2026 04:10:00 GMT</pubDate>
+<description>&lt;p&gt;Board meeting outcome&lt;/p&gt;</description></item>
+<item><title>Unrelated market wrap</title><link>https://example.com/a2</link></item>
+</channel></rss>"""
+
+
+def test_news_matching_reaction_and_feed_polling(intel):
+    import httpx
+
+    service, clock, _ = intel
+    run(service, clock, 600)
+    item = service.news.ingest("Reliance: RELIANCE wins large order", at=clock.now() - timedelta(minutes=5))
+    assert item.instruments == [RELIANCE]
+    assert service.event_store.search(kinds=["NEWS"], instrument_id=RELIANCE)
+    reaction = service.news.reaction(item.news_id)["reactions"][0]
+    assert reaction["prices"]["0"]["price"] and "+1m" in reaction["prices"]
+    assert service.news.ingest("Reliance: RELIANCE wins large order").news_id == item.news_id  # de-duplicated
+
+    service.news._http = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, text=RSS)))
+    service.news.configure(feeds=["https://example.com/rss"])
+    assert service.news.poll() == 2 and service.news.poll() == 0
+    listed = service.news.list(RELIANCE)
+    assert any("bonus" in n["headline"] for n in listed)
+
+
+def test_corporate_events_import_and_raise(intel):
+    service, clock, _ = intel
+    today = clock.now().date()
+    result = service.news.import_csv(
+        f"symbol,date,kind,details\nRELIANCE,{today},RESULTS,Q2 results\nNOPE,{today},DIVIDEND,\n"
+    )
+    assert result["added"] == 1 and "unknown symbol NOPE" in result["errors"][0]
+    assert service.news.upcoming_for(RELIANCE)["kind"] == "RESULTS"
+    service.news.raise_due()
+    service.news.raise_due()
+    assert len(service.event_store.search(kinds=["CORPORATE_EVENT"])) == 1
+
+
+def test_replay_runs_recorded_books_through_fresh_engines(intel):
+    service, clock, _ = intel
+    service.configure({"recording": {"enabled": True, "acknowledge": True}}, "u1")
+    start = clock.now()
+    run(service, clock, 900)
+    service.recorder.flush()
+    info = service.replay.create(RELIANCE, start, clock.now())
+    assert info["books"] >= 800 and info["sources"] == ["SIMULATED"] and info["recorded_events"]
+    session = service.replay.get(info["replay_id"])
+    late = session.frame(clock.now())
+    assert late["done"] and late["books"]["SIMULATED"]["bids"] and late["events"]
+    early = session.frame(start + timedelta(seconds=60))
+    assert early["position"] < late["position"] and not early["done"]
+    assert all(e["at"] <= (start + timedelta(seconds=60)).isoformat() for e in early["recorded_events"])
