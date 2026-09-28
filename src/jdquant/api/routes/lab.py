@@ -50,6 +50,39 @@ def translate(body: TranslateIn, request: Request, principal: Principal = Depend
     return _lab(request).translate(body.text, body.instrument_id, body.interval_seconds)
 
 
+class CheckIn(BaseModel):
+    spec: dict[str, Any]
+
+
+@router.get("/strategy-lab/vocabulary")
+def vocabulary(principal: Principal = Depends(require("backtest:run"))) -> dict[str, Any]:
+    """What a rule can be built from, for the visual builder (the same lists the validator uses)."""
+    from jdquant.strategy.rules import CHOICES, INDICATORS, OPS, SIDES
+
+    return {
+        "indicators": {
+            name: {
+                "params": {p: {"default": d, "min": lo, "max": hi} for p, (d, lo, hi) in params.items()},
+                "choice": {"key": CHOICES[name][0], "options": list(CHOICES[name][1])}
+                if name in CHOICES
+                else None,
+            }
+            for name, params in INDICATORS.items()
+        },
+        "ops": list(OPS),
+        "sides": list(SIDES),
+    }
+
+
+@router.post("/strategy-lab/check")
+def check(body: CheckIn, principal: Principal = Depends(require("backtest:run"))) -> dict[str, Any]:
+    """Validate rules built by hand and describe them in plain English (no AI involved)."""
+    from jdquant.strategy.rules import describe, validate_spec
+
+    spec = validate_spec(body.spec)
+    return {"spec": spec, "description": describe(spec)}
+
+
 @router.post("/strategy-lab/backtests", status_code=201)
 def backtest(body: LabBacktestIn, request: Request, principal: Principal = Depends(require("backtest:run"))):
     run = _lab(request).backtest(

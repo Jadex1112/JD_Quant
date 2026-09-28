@@ -11,6 +11,11 @@ order rate, daily loss, stale data and reduce-only (Chapter 27). These guards ad
 - **Expected slippage**: a market order whose depth-walked fill would cost more than the limit.
 - **Corporate events**: new positions in an instrument with results, a split, a dividend... today or
   tomorrow can be blocked (or only flagged).
+- **Broker unavailable**: no new positions on a live account whose broker is not signed in or whose
+  adapter has stopped calling it after repeated errors (API failure protection).
+- **Margin**: the margin a new position needs (its notional divided by the market's leverage cap; the full
+  notional in cash markets) must fit in the broker's free funds, kept fresh by `BalanceCache`. When the
+  funds are unknown the broker's own margin check is the last line.
 
 Every guard fails closed to "allowed" only for orders that reduce a position: exits are never blocked
 by these checks.
@@ -40,6 +45,9 @@ class GuardSettings:
     max_group_notional: float = 0.0  # per asset group per account, in the account's currency; 0: no limit
     require_stop_for_automated: bool = False
     max_expected_slippage_bps: float = 50.0  # 0: no limit
+    block_when_broker_unavailable: bool = True
+    check_margin: bool = True
+    margin_buffer_pct: float = 10.0  # keep this share of free funds unused
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -55,6 +63,9 @@ class TradingGuards:
         corporate: Callable[[str], dict | None] | None = None,
         corporate_mode: Callable[[], str] | None = None,
         fx_to_account: Callable[[str, str], Decimal] | None = None,
+        broker_problem: Callable[[str], str | None] | None = None,
+        free_funds: Callable[[str], Decimal | None] | None = None,
+        margin_rate: Callable[[Order], Decimal] | None = None,
     ):
         self._store = store
         self._p = platform
@@ -62,6 +73,9 @@ class TradingGuards:
         self._corporate = corporate or (lambda instrument_id: None)
         self._corporate_mode = corporate_mode or (lambda: "warn")  # the news desk's setting
         self._fx = fx_to_account or (lambda quote, account_currency: Decimal(1))
+        self._broker_problem = broker_problem or (lambda account_id: None)
+        self._free_funds = free_funds or (lambda account_id: None)
+        self._margin_rate = margin_rate or (lambda order: Decimal(1))
         saved = store.get(KIND, "settings") or {}
         self.settings = GuardSettings(
             **{k: v for k, v in saved.items() if k in GuardSettings.__dataclass_fields__}
@@ -78,6 +92,10 @@ class TradingGuards:
             **self.settings.to_dict(),
             **{k: v for k, v in changes.items() if k in GuardSettings.__dataclass_fields__},
         }
+        if values["margin_buffer_pct"] >= 100:
+            raise ValidationError(
+                "INVALID_SETTINGS", [{"field": "margin_buffer_pct", "message": "must be under 100"}]
+            )
         if any(
             values[k] < 0
             for k in (
@@ -85,6 +103,7 @@ class TradingGuards:
                 "max_open_positions",
                 "max_group_notional",
                 "max_expected_slippage_bps",
+                "margin_buffer_pct",
             )
         ):
             raise ValidationError(
@@ -100,11 +119,13 @@ class TradingGuards:
         if order.source is OrderSource.SYSTEM or self._reduces(order):
             return None
         for check in (
+            self._broker,
             self._duplicate,
             self._open_positions,
             self._group_exposure,
             self._stop,
             self._slippage,
+            self._margin,
             self._corporate_event,
         ):
             reason = check(order)
@@ -201,6 +222,35 @@ class TradingGuards:
             return "EXPECTED_SLIPPAGE"  # the visible book cannot fill it
         return "EXPECTED_SLIPPAGE" if estimate["slippage_bps"] > limit else None
 
+    def _live(self, order: Order) -> bool:
+        from jdquant.trading.engine import AccountMode
+
+        return self._p.trading.get_account(order.account_id).mode is AccountMode.LIVE
+
+    def _broker(self, order: Order) -> str | None:
+        if not self.settings.block_when_broker_unavailable or not self._live(order):
+            return None
+        return self._broker_problem(order.account_id)
+
+    def _margin(self, order: Order) -> str | None:
+        if not self.settings.check_margin or not self._live(order):
+            return None
+        free = self._free_funds(order.account_id)
+        price = order.limit_price or self._p.market.reference_price(order.instrument_id)
+        if free is None or price is None:
+            return None
+        instrument = self._p.instruments.get(order.instrument_id)
+        account = self._p.trading.get_account(order.account_id)
+        notional = (
+            order.quantity
+            * price
+            * instrument.contract_multiplier
+            * self._fx(instrument.quote_asset, account.base_currency)
+        )
+        required = notional * self._margin_rate(order)
+        usable = free * (1 - Decimal(str(self.settings.margin_buffer_pct)) / 100)
+        return "INSUFFICIENT_MARGIN" if required > usable else None
+
     def _corporate_event(self, order: Order) -> str | None:
         mode = self._corporate_mode()
         if mode == "off":
@@ -226,3 +276,44 @@ class TradingGuards:
             "recent_blocks": list(self.blocked)[-50:],
             "recent_warnings": list(self.warnings)[-50:],
         }
+
+
+class BalanceCache:
+    """Free funds of live accounts, fetched from the brokers in the background (never in the order path)."""
+
+    MAX_AGE_SECONDS = 300
+
+    def __init__(self, platform, connections):
+        self._p = platform
+        self._connections = connections
+        self._funds: dict[str, tuple[float, Decimal]] = {}  # account -> (monotonic, free)
+        self.errors: dict[str, str] = {}
+
+    def refresh(self) -> None:
+        from jdquant.trading.engine import AccountMode
+
+        for account in list(self._p.trading.accounts.values()):
+            if account.mode is not AccountMode.LIVE:
+                continue
+            adapter = self._connections.adapter_for_account(account.account_id)
+            if adapter is None or not adapter.is_ready():
+                continue
+            try:
+                balances = adapter.fetch_balances()
+            except Exception as exc:  # keep the last value until it ages out
+                self.errors[account.account_id] = str(exc)[:200]
+                continue
+            match = [b for b in balances if b.asset.upper() == account.base_currency.upper()]
+            if not match:
+                continue
+            self._funds[account.account_id] = (time.monotonic(), sum((b.free for b in match), Decimal(0)))
+            self.errors.pop(account.account_id, None)
+
+    def set(self, account_id: str, free: Decimal) -> None:
+        self._funds[account_id] = (time.monotonic(), free)
+
+    def free(self, account_id: str) -> Decimal | None:
+        found = self._funds.get(account_id)
+        if found is None or time.monotonic() - found[0] > self.MAX_AGE_SECONDS:
+            return None
+        return found[1]

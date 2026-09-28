@@ -1,6 +1,7 @@
 """Signals with reasons, the journal, execution quality, guards, circuit breakers, flow strategies."""
 
 import random
+import time
 from datetime import timedelta
 from decimal import Decimal
 
@@ -276,3 +277,55 @@ def test_automation_api(app_ctx):
     )
     assert client.get("/api/v1/automation/portfolio").status_code == 200
     assert client.post("/api/v1/automation/reconcile").status_code == 200
+
+
+def test_live_entries_need_a_working_broker_and_margin(app_ctx):
+    from types import SimpleNamespace
+
+    from jdquant.connectivity.base import Balance
+
+    _, c, platform, _ = app_ctx
+    guards, balances = c.services["guards"], c.services["balances"]
+    platform.trading.register_account(TradingAccount("live-1", "Live", "BINANCE", AccountMode.LIVE, "USDT"))
+
+    class Adapter:
+        venue, ready, circuit_open_until = "BINANCE", False, 0.0
+
+        def is_ready(self):
+            return self.ready
+
+        def fetch_balances(self):
+            return [Balance("USDT", Decimal(1000), Decimal(0)), Balance("BTC", Decimal(1), Decimal(0))]
+
+    adapter = Adapter()
+    connections = c.services["connections"]
+    connections.connections["c-live"] = SimpleNamespace(connection_id="c-live", account_id="live-1")
+    connections.adapters["c-live"] = adapter
+
+    def order(qty, side=Side.BUY, account="live-1"):
+        return SimpleNamespace(
+            order_id="O1",
+            account_id=account,
+            instrument_id=BTC,
+            side=side,
+            quantity=Decimal(qty),
+            order_type=OrderType.MARKET,
+            limit_price=None,
+            tags={},
+            source=OrderSource.MANUAL,
+            deployment_id=None,
+            submitter="u",
+        )
+
+    assert guards(order("0.01")) == "BROKER_NOT_SIGNED_IN"
+    assert guards(order("0.01", account=PAPER_ACCOUNT_ID)) is None  # paper accounts are not affected
+    adapter.ready = True
+    assert guards(order("0.01")) is None  # funds unknown: the broker's own check decides
+    balances.refresh()
+    assert balances.free("live-1") == Decimal(1000)
+    assert guards(order("0.01")) is None  # 500 USDT of a 1,000 USDT balance (10% kept free)
+    assert guards(order("0.02")) == "INSUFFICIENT_MARGIN"  # spot crypto: the full notional
+    adapter.circuit_open_until = time.monotonic() + 60
+    assert guards(order("0.01")) == "BROKER_UNAVAILABLE"
+    guards.configure({"block_when_broker_unavailable": False, "check_margin": False})
+    assert guards(order("0.02")) is None

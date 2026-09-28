@@ -307,3 +307,15 @@ def test_backtest_endpoint_uses_broker_history_and_market_charges(platform):
     context.services["autopilot"]._venue_candles = lambda inst, interval, bars: history
     ok = client.post("/api/v1/backtests", json={**body, "data_source": "history", "fees_model": "market"})
     assert ok.status_code == 201, ok.text
+
+
+def test_visual_builder_vocabulary_and_check(app_ctx):
+    client = app_ctx[0]
+    vocab = client.get("/api/v1/strategy-lab/vocabulary").json()
+    assert vocab["indicators"]["ema"]["params"]["period"]["default"] == 20
+    assert vocab["indicators"]["bb"]["choice"]["options"] == ["upper", "middle", "lower"]
+    assert "crosses_above" in vocab["ops"]
+    checked = client.post("/api/v1/strategy-lab/check", json={"spec": EMA_CROSS}).json()
+    assert checked["spec"]["long_entry"] and checked["description"]
+    bad = client.post("/api/v1/strategy-lab/check", json={"spec": {"long_exit": {}}})
+    assert bad.status_code == 400 and bad.json()["errors"][0]["field"] == "long_entry"

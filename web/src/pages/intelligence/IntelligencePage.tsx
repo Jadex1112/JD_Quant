@@ -501,6 +501,7 @@ export interface FuturesInfo {
   positioning?: { state: string | null; reading: string; price_change_pct?: number; oi_change_pct?: number };
   basis?: { basis: number; basis_pct: number | null; days_to_expiry: number | null; annualized_pct: number | null; state: string };
   reference?: string;
+  calendar?: { near: string; far: string; near_expiry: string; far_expiry: string; spread: number; spread_pct: number | null; state: string }[];
 }
 
 export function FuturesView({ view }: { view: FuturesInfo }) {
@@ -526,6 +527,18 @@ export function FuturesView({ view }: { view: FuturesInfo }) {
           <dd>
             {view.basis.state.toLowerCase()} {signed(view.basis.basis)} ({signed(view.basis.basis_pct)}%)
             {view.basis.annualized_pct != null && `, ${view.basis.annualized_pct.toFixed(1)}% a year`}
+          </dd>
+        </>
+      )}
+      {view.calendar && view.calendar.length > 0 && (
+        <>
+          <dt>Calendar spreads</dt>
+          <dd>
+            {view.calendar.map((c) => (
+              <div key={c.near + c.far}>
+                {c.near_expiry} → {c.far_expiry}: {signed(c.spread)} ({signed(c.spread_pct)}%) {c.state.toLowerCase()}
+              </div>
+            ))}
           </dd>
         </>
       )}

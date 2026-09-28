@@ -213,3 +213,48 @@ def test_replay_runs_recorded_books_through_fresh_engines(intel):
     early = session.frame(start + timedelta(seconds=60))
     assert early["position"] < late["position"] and not early["done"]
     assert all(e["at"] <= (start + timedelta(seconds=60)).isoformat() for e in early["recorded_events"])
+
+
+def test_futures_view_shows_calendar_spreads(intel):
+    from decimal import Decimal
+
+    from jdquant.marketdata.instruments import AssetClass, Instrument
+
+    service, clock, platform = intel
+
+    def future(symbol, days):
+        return Instrument(
+            "MCX",
+            symbol,
+            AssetClass.COMMODITY,
+            "GOLDM",
+            "INR",
+            Decimal(1),
+            Decimal(1),
+            Decimal(1),
+            contract_multiplier=Decimal(10),
+            expiry=OPEN + timedelta(days=days),
+            underlying="GOLDM",
+        )
+
+    near, far = future("GOLDM26JANFUT", 20), future("GOLDM26FEBFUT", 50)
+    platform.instruments.add(near)
+    platform.instruments.add(far)
+    for inst, price in ((near, 70000.0), (far, 70450.0)):
+        service.hub.publish(
+            BookSnapshot(
+                inst.instrument_id,
+                "FYERS",
+                OPEN,
+                OPEN,
+                (Level(price - 1, 5, 1),),
+                (Level(price + 1, 5, 1),),
+                last_price=price,
+                open_interest=1000.0,
+            )
+        )
+    view = service.futures_view(near.instrument_id)
+    [spread] = view["calendar"]
+    assert spread["near"] == near.instrument_id and spread["far"] == far.instrument_id
+    assert spread["spread"] == 450.0 and spread["state"] == "CONTANGO"
+    assert service.futures_view(far.instrument_id)["calendar"][0]["spread"] == 450.0

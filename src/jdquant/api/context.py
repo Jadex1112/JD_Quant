@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -196,7 +197,7 @@ def _attach_automation(platform, store, services, connections, runner, intellige
     from decimal import Decimal
 
     from jdquant.risk.circuit import CircuitBreakers
-    from jdquant.risk.guards import TradingGuards
+    from jdquant.risk.guards import BalanceCache, TradingGuards
     from jdquant.strategy.registry import StrategyRegistry
     from jdquant.trading.execution import ExecutionMonitor
     from jdquant.trading.journal import TradeJournal
@@ -238,6 +239,27 @@ def _attach_automation(platform, store, services, connections, runner, intellige
         venue_of=venue_of,
         multiplier=multiplier,
     )
+
+    def broker_problem(account_id: str) -> str | None:
+        adapter = connections.adapter_for_account(account_id)
+        if adapter is None:
+            return "BROKER_NOT_CONNECTED"
+        if not adapter.is_ready():
+            return "BROKER_NOT_SIGNED_IN"
+        if adapter.circuit_open_until > time.monotonic():
+            return "BROKER_UNAVAILABLE"
+        return None
+
+    def margin_rate(order) -> Decimal:
+        from jdquant.autopilot.research import market_leverage
+        from jdquant.markets.india import Product
+
+        adapter = connections.adapter_for_account(order.account_id)
+        intraday = getattr(adapter, "product", None) is Product.INTRADAY
+        cap, _ = market_leverage(platform.instruments.get(order.instrument_id), intraday)
+        return 1 / cap
+
+    balances = BalanceCache(platform, connections)
     guards = TradingGuards(
         store,
         platform,
@@ -245,12 +267,26 @@ def _attach_automation(platform, store, services, connections, runner, intellige
         corporate=intelligence.news.upcoming_for,
         corporate_mode=lambda: intelligence.news.block_mode,
         fx_to_account=fx,
+        broker_problem=broker_problem,
+        free_funds=balances.free,
+        margin_rate=margin_rate,
     )
     platform.trading.extra_checks.append(guards)
     circuit = CircuitBreakers(platform, store, connections=connections, journal=journal, execution=execution)
-    intelligence.periodic += [("circuit", 10, circuit.tick), ("reconcile", 60, circuit.reconcile)]
+    intelligence.periodic += [
+        ("circuit", 10, circuit.tick),
+        ("reconcile", 60, circuit.reconcile),
+        ("balances", 60, balances.refresh),
+    ]
     runner.features = intelligence.features
-    services.update(journal=journal, signals=signals, execution=execution, guards=guards, circuit=circuit)
+    services.update(
+        journal=journal,
+        signals=signals,
+        execution=execution,
+        guards=guards,
+        circuit=circuit,
+        balances=balances,
+    )
     services["registry"] = StrategyRegistry(
         store, platform, candles=services["autopilot"]._venue_candles, journal=journal, runner=runner
     )

@@ -282,7 +282,18 @@ def estimate(body: EstimateIn, request: Request, principal: Principal = Depends(
 
 @router.get("/guards")
 def guards(request: Request, principal: Principal = Depends(require("risk.profile:view"))):
-    return _svc(request, "guards").status()
+    c = ctx(request)
+    balances = c.services["balances"]
+    funds = {
+        a.account_id: {
+            "free": None if (f := balances.free(a.account_id)) is None else str(f),
+            "currency": a.base_currency,
+            "error": balances.errors.get(a.account_id),
+        }
+        for a in c.platform.trading.accounts.values()
+        if a.mode is AccountMode.LIVE
+    }
+    return {**_svc(request, "guards").status(), "live_funds": funds}
 
 
 @router.put("/guards")

@@ -582,6 +582,9 @@ const GUARD_HELP: Record<string, string> = {
   max_group_notional: "Most exposure in one sector or asset group, account currency (0 = no limit)",
   require_stop_for_automated: "Automated entries must state a stop-loss",
   max_expected_slippage_bps: "Block entries whose expected slippage for their size exceeds this",
+  block_when_broker_unavailable: "Block new positions on a live account whose broker is not signed in or keeps failing",
+  check_margin: "Check that a new position's margin fits the broker's free funds",
+  margin_buffer_pct: "Keep this % of free funds unused",
 };
 
 const CIRCUIT_HELP: Record<string, string> = {
@@ -630,7 +633,7 @@ function SettingsForm({ title, values, help, onSave }: { title: string; values: 
 
 function ProtectionsTab({ circuit, reload }: { circuit?: Circuit; reload: () => void }) {
   const { run } = useApp();
-  const guards = useData(() => get<{ settings: Record<string, number | boolean>; recent_blocks: { at: string; order_id: string; instrument_id: string; reason: string }[]; recent_warnings: { at: string; instrument_id: string; event: { kind?: string; day?: string } }[] }>("/automation/guards"), []);
+  const guards = useData(() => get<{ settings: Record<string, number | boolean>; live_funds: Record<string, { free: string | null; currency: string; error: string | null }>; recent_blocks: { at: string; order_id: string; instrument_id: string; reason: string }[]; recent_warnings: { at: string; instrument_id: string; event: { kind?: string; day?: string } }[] }>("/automation/guards"), []);
   return (
     <div className="stack">
       <div className="grid two">
@@ -657,6 +660,24 @@ function ProtectionsTab({ circuit, reload }: { circuit?: Circuit; reload: () => 
           />
         )}
       </div>
+      {guards.data && Object.keys(guards.data.live_funds).length > 0 && (
+        <Section title="Live account funds (for the margin check)">
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>Account</th><th>Free funds</th><th>Note</th></tr></thead>
+              <tbody>
+                {Object.entries(guards.data.live_funds).map(([account, f]) => (
+                  <tr key={account}>
+                    <td>{account}</td>
+                    <td>{f.free == null ? "unknown" : `${num(f.free, 2)} ${f.currency}`}</td>
+                    <td className="small">{f.error ?? (f.free == null ? "Fetched every minute once the broker is signed in; until then the broker's own margin check decides." : "")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Section>
+      )}
       <div className="grid two">
         <Section title="Breaker trips">
           {!circuit?.trips.length ? (

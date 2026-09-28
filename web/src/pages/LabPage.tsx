@@ -5,6 +5,8 @@ import { useApp } from "../app-state";
 import { Badge, Dialog, Empty, Section, useData } from "../components/ui";
 import { num, pct, ratio, signed, time, tone } from "../format";
 
+import { RuleBuilder, emptyBuilder, fromSpec, toSpec, type BuilderState } from "./RuleBuilder";
+
 const LineChart = lazy(() => import("../components/LineChart").then((m) => ({ default: m.LineChart })));
 
 const EXAMPLES = [
@@ -23,7 +25,9 @@ const BARS: [number, string][] = [
 const GRADE: Record<string, string> = { High: "good", Medium: "warn", Low: "bad" };
 
 export function LabPage() {
-  const { run } = useApp();
+  const { run, notify } = useApp();
+  const [mode, setMode] = useState<"words" | "visual">("words");
+  const [builder, setBuilder] = useState<BuilderState>(emptyBuilder);
   const instruments = useData(() => get<Instrument[]>("/instruments"), []);
   const history = useData(() => get<LabRun[]>("/strategy-lab/runs"), []);
   const [text, setText] = useState("");
@@ -84,6 +88,32 @@ export function LabPage() {
     setBusy("");
   };
 
+  const checkBuilt = async () => {
+    const out = await run(() => post<{ spec: RuleSpec; description: string[] }>("/strategy-lab/check", { spec: toSpec(builder) }));
+    if (out) {
+      setTranslation({ spec: out.spec, description: out.description, assumptions: [], unsupported: [], model: "visual builder" });
+      setSpecText(JSON.stringify(out.spec, null, 2));
+      setText("");
+      setResult(null);
+    }
+  };
+
+  const editVisually = () => {
+    let loaded: BuilderState | null = null;
+    try {
+      loaded = fromSpec(JSON.parse(specText));
+    } catch {
+      loaded = null;
+    }
+    if (!loaded) {
+      notify("These rules use nested groups the visual builder cannot show; edit them as JSON.", true);
+      return;
+    }
+    setBuilder(loaded);
+    setMode("visual");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
   const open = async (runId: string) => {
     const out = await run(() => get<LabRun>(`/strategy-lab/runs/${runId}`));
     if (out) {
@@ -102,8 +132,19 @@ export function LabPage() {
       <h1 style={{ margin: 0 }}>
         Strategy lab <Badge kind="ai">AI</Badge>
       </h1>
-      <Section title="1 · Describe your strategy">
+      <Section
+        title={mode === "words" ? "1 · Describe your strategy" : "1 · Build your strategy"}
+        actions={
+          <div className="segmented" role="group" aria-label="How to write the strategy">
+            <button className="small" aria-pressed={mode === "words"} onClick={() => setMode("words")}>In words (AI)</button>
+            <button className="small" aria-pressed={mode === "visual"} onClick={() => setMode("visual")}>Visual builder</button>
+          </div>
+        }
+      >
         <div className="stack">
+          {mode === "visual" && <RuleBuilder state={builder} onChange={setBuilder} />}
+          {mode === "words" && (
+          <>
           <label className="field">
             <span className="sr-only">Strategy description</span>
             <textarea
@@ -121,6 +162,8 @@ export function LabPage() {
               </button>
             ))}
           </div>
+          </>
+          )}
           <div className="form-grid">
             <label className="field">
               Market
@@ -152,9 +195,15 @@ export function LabPage() {
             </label>
           </div>
           <div className="row end">
-            <button className="primary" onClick={translate} disabled={!text.trim() || !instrumentId || busy !== ""}>
-              {busy === "translate" ? "The AI is writing the rules…" : "Turn into rules with AI"}
-            </button>
+            {mode === "words" ? (
+              <button className="primary" onClick={translate} disabled={!text.trim() || !instrumentId || busy !== ""}>
+                {busy === "translate" ? "The AI is writing the rules…" : "Turn into rules with AI"}
+              </button>
+            ) : (
+              <button className="primary" onClick={checkBuilt} disabled={!instrumentId || busy !== ""}>
+                Check the rules
+              </button>
+            )}
           </div>
         </div>
       </Section>
@@ -196,6 +245,7 @@ export function LabPage() {
               />
             </details>
             <div className="row end">
+              <button onClick={editVisually} disabled={!specText}>Edit visually</button>
               <button className="primary" onClick={backtest} disabled={busy !== "" || !specText}>
                 {busy === "backtest" ? "Backtesting…" : "3 · Backtest"}
               </button>

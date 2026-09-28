@@ -43,7 +43,7 @@ from jdquant.intelligence.events import (
     EventStore,
     MarketEvent,
 )
-from jdquant.intelligence.futures import FuturesObservation, basis, classify
+from jdquant.intelligence.futures import FuturesObservation, basis, calendar_spread, classify
 from jdquant.intelligence.options import OptionChain, analyze, shocks, simulated_chain
 from jdquant.intelligence.orderbook import OrderBookEngine, expected_fill
 from jdquant.intelligence.orderflow import OrderFlowEngine
@@ -773,7 +773,40 @@ class MarketIntelligence:
         spot = self._p.market.reference_price(spot_id) if spot_id else None
         if spot:
             out["basis"] = basis(book.last_price, float(spot), instrument.expiry, self.clock.now())
+        out["calendar"] = self._calendar(instrument, obs)
         return out
+
+    def _calendar(self, instrument: Instrument, obs: FuturesObservation) -> list[dict[str, Any]]:
+        """Spreads to the other listed expiries of the same underlying (contango or backwardation)."""
+        rows = []
+        for other in self._p.instruments.all():
+            if (
+                other.instrument_id == instrument.instrument_id
+                or not other.is_future
+                or other.venue != instrument.venue
+                or other.underlying != instrument.underlying
+                or other.expiry is None
+                or instrument.expiry is None
+                or other.expiry == instrument.expiry
+            ):
+                continue
+            other_book = self.hub.book(other.instrument_id)
+            price = other_book.last_price if other_book and other_book.last_price else None
+            if price is None:
+                ref = self._p.market.reference_price(other.instrument_id)
+                price = float(ref) if ref is not None else None
+            if price is None:
+                continue
+            twin = FuturesObservation(other.instrument_id, price, None, obs.at, other.expiry)
+            near, far = (obs, twin) if instrument.expiry < other.expiry else (twin, obs)
+            rows.append(
+                {
+                    **calendar_spread(near, far),
+                    "near_expiry": near.expiry.date().isoformat(),
+                    "far_expiry": far.expiry.date().isoformat(),
+                }
+            )
+        return sorted(rows, key=lambda r: (r["near_expiry"], r["far_expiry"]))
 
     # ---- options ----------------------------------------------------------------------------------------
 
