@@ -3,6 +3,8 @@ import { get, type Instrument } from "../api";
 import { useApp } from "../app-state";
 import { Dialog, Empty, Section, StatusBadge, useData } from "../components/ui";
 import { num } from "../format";
+import { InstrumentPicker } from "../components/InstrumentPicker";
+import { TradingViewChart, tradingViewUrl } from "../components/TradingViewChart";
 import { pushQuote } from "./TradingPage";
 
 const PriceChart = lazy(() => import("../components/PriceChart").then((m) => ({ default: m.PriceChart })));
@@ -13,6 +15,21 @@ export function MarketsPage() {
   const [query, setQuery] = useState("");
   const [quoteFor, setQuoteFor] = useState<Instrument | null>(null);
   const [charted, setCharted] = useState("");
+  const [chartKind, setChartKind] = useState<"app" | "tradingview">(() => {
+    try {
+      return localStorage.getItem("jq-chart") === "tradingview" ? "tradingview" : "app";
+    } catch {
+      return "app";
+    }
+  });
+  const chooseChart = (kind: "app" | "tradingview") => {
+    setChartKind(kind);
+    try {
+      localStorage.setItem("jq-chart", kind);
+    } catch {
+      /* the choice just isn't remembered */
+    }
+  };
   const instruments = useData(() => get<Instrument[]>("/instruments"), [], 3000);
   const all = instruments.data ?? [];
   const venues = [...new Set(all.map((i) => i.venue))].sort();
@@ -28,10 +45,39 @@ export function MarketsPage() {
     <div className="stack">
       <h1>Markets</h1>
       {charted && (
-        <section className="card">
-          <Suspense fallback={<div className="muted small">Loading chart…</div>}>
-            <PriceChart instrumentId={charted} instruments={all} onInstrumentChange={setCharted} />
-          </Suspense>
+        <section className="card stack" style={{ gap: 10 }}>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <div className="segmented" role="group" aria-label="Chart">
+              <button className="small" aria-pressed={chartKind === "app"} onClick={() => chooseChart("app")}>
+                App chart (your broker&apos;s prices)
+              </button>
+              <button className="small" aria-pressed={chartKind === "tradingview"} onClick={() => chooseChart("tradingview")}>
+                TradingView
+              </button>
+            </div>
+            <a className="small" href={tradingViewUrl(charted)} target="_blank" rel="noopener noreferrer">
+              Open in TradingView ↗
+            </a>
+          </div>
+          {chartKind === "app" ? (
+            <Suspense fallback={<div className="muted small">Loading chart…</div>}>
+              <PriceChart instrumentId={charted} instruments={all} onInstrumentChange={setCharted} />
+            </Suspense>
+          ) : (
+            <>
+              <div className="row">
+                <span className="chart-picker">
+                  <InstrumentPicker instruments={all} value={charted} onChange={setCharted} label="Chart instrument" />
+                </span>
+                <span className="small muted">
+                  TradingView&apos;s chart and data, with its indicators and drawing tools. To trade from TradingView with
+                  Fyers, use <em>Open in TradingView</em> and connect Fyers in its Trading Panel; orders placed there do not
+                  go through this app&apos;s risk checks.
+                </span>
+              </div>
+              <TradingViewChart instrumentId={charted} />
+            </>
+          )}
         </section>
       )}
       <Section

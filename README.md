@@ -190,6 +190,8 @@ On **Backtests**, after a run press **Paper trade this…**. It deploys the same
 
 **Markets** (opening on XAU/USD) and **Trading** show a candlestick chart (1m, 5m, 15m, 1h, 1D) for the selected instrument, with your fills marked as arrows. The chart loads broker history when available, then updates with every quote through a server-sent event stream (`/api/v1/market-data/stream`). Each chart is badged as **LIVE**, **SIMULATED** (demo feed) or **OFFLINE**.
 
+On **Markets**, type in the box above the chart to switch instrument. The **TradingView** switch shows TradingView's own chart (its data, indicators and drawing tools) for the same symbol, embedded as a frame: it does not use your broker's prices and cannot trade. **Open in TradingView** opens the symbol on tradingview.com, where you can connect Fyers in TradingView's Trading Panel; orders placed there bypass this app's risk limits, kill switch and journal.
+
 ## OANDA (XAU/USD and forex)
 
 1. In the OANDA hub, open **Manage API Access** and generate a token. Note your account ID (e.g. `101-001-1234567-001`).

@@ -125,6 +125,8 @@ def create_app(
         response.headers.setdefault(
             "Content-Security-Policy",
             "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+            # TradingView's chart is embedded only as a cross-origin frame; none of its scripts run here
+            "frame-src https://www.tradingview-widget.com https://s.tradingview.com; "
             "frame-ancestors 'none'",
         )
         return response
