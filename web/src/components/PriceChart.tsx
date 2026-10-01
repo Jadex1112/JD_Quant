@@ -9,8 +9,9 @@ import {
   type SeriesMarker,
   type UTCTimestamp,
 } from "lightweight-charts";
-import { get, type Fill } from "../api";
+import { get, type Fill, type Instrument } from "../api";
 import { num, signed, tone } from "../format";
+import { InstrumentPicker } from "./InstrumentPicker";
 import { Badge } from "./ui";
 
 interface Bar {
@@ -39,8 +40,21 @@ function cssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
-/** Candlestick chart that keeps the last bar moving with every streamed quote, with your fills marked. */
-export function PriceChart({ instrumentId, height = 360 }: { instrumentId: string; height?: number }) {
+/**
+ * Candlestick chart that keeps the last bar moving with every streamed quote, with your fills marked.
+ * Pass `instruments` and `onInstrumentChange` to let the viewer switch instrument from the chart's header.
+ */
+export function PriceChart({
+  instrumentId,
+  height = 360,
+  instruments,
+  onInstrumentChange,
+}: {
+  instrumentId: string;
+  height?: number;
+  instruments?: Instrument[];
+  onInstrumentChange?: (instrumentId: string) => void;
+}) {
   const box = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -145,7 +159,13 @@ export function PriceChart({ instrumentId, height = 360 }: { instrumentId: strin
     <figure style={{ margin: 0 }}>
       <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
         <div className="row">
-          <strong>{instrumentId}</strong>
+          {instruments && onInstrumentChange ? (
+            <span className="chart-picker">
+              <InstrumentPicker instruments={instruments} value={instrumentId} onChange={onInstrumentChange} label="Chart instrument" />
+            </span>
+          ) : (
+            <strong>{instrumentId}</strong>
+          )}
           <span className="value" style={{ fontVariantNumeric: "tabular-nums" }}>{num(price)}</span>
           {change !== null && (
             <span className={`small ${tone(change)}`}>

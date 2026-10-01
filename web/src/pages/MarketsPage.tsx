@@ -30,7 +30,7 @@ export function MarketsPage() {
       {charted && (
         <section className="card">
           <Suspense fallback={<div className="muted small">Loading chart…</div>}>
-            <PriceChart instrumentId={charted} />
+            <PriceChart instrumentId={charted} instruments={all} onInstrumentChange={setCharted} />
           </Suspense>
         </section>
       )}

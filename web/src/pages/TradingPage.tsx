@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { ApiError, accountTrades, api, get, post, type Fill, type Instrument, type Order, type Position } from "../api";
 import { describe, useApp } from "../app-state";
+import { InstrumentPicker } from "../components/InstrumentPicker";
 import { FillsTable, OrdersTable, PositionsTable } from "../components/tables";
 import { Confirm, ModeBadge, Section, useData } from "../components/ui";
 import { num } from "../format";
@@ -141,13 +142,7 @@ function OrderTicket({ onSubmitted, onInstrument }: { onSubmitted: () => void; o
           </label>
           <label className="field">
             Instrument
-            <select value={instrumentId} onChange={(e) => setInstrumentId(e.target.value)}>
-              {available.map((i) => (
-                <option key={i.instrument_id} value={i.instrument_id}>
-                  {i.instrument_id}
-                </option>
-              ))}
-            </select>
+            <InstrumentPicker instruments={available} value={instrumentId} onChange={setInstrumentId} />
           </label>
         </div>
         <div className="row">
