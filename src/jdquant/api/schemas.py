@@ -1,0 +1,403 @@
+"""REST request/response models. Decimals travel as strings (Chapter 80.2, CON-022)."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from decimal import Decimal
+from typing import Annotated, Any, Literal
+
+from pydantic import BaseModel, BeforeValidator, Field, PlainSerializer
+
+from jdquant.core.types import Side
+from jdquant.oms.orders import OrderType, TimeInForce
+from jdquant.risk.engine import LimitType
+from jdquant.trading.engine import KillSwitchAction, KillSwitchScope
+
+
+def _no_float(value: Any) -> Any:
+    if isinstance(value, float):
+        raise ValueError("decimal values must be sent as strings, not JSON numbers with fractions")
+    return value
+
+
+Dec = Annotated[Decimal, BeforeValidator(_no_float), PlainSerializer(lambda d: str(d), return_type=str)]
+
+
+class OrderIn(BaseModel):
+    account_id: str
+    instrument_id: str
+    side: Side
+    order_type: OrderType
+    quantity: Dec
+    limit_price: Dec | None = None
+    stop_price: Dec | None = None
+    time_in_force: TimeInForce | None = None
+    post_only: bool = False
+    reduce_only: bool = False
+    tags: dict[str, str] = Field(default_factory=dict)
+
+
+class OrderOut(BaseModel):
+    order_id: str
+    client_order_id: str
+    account_id: str
+    deployment_id: str
+    instrument_id: str
+    side: Side
+    order_type: OrderType
+    time_in_force: TimeInForce
+    quantity: Dec
+    limit_price: Dec | None
+    status: str
+    filled_quantity: Dec
+    remaining_quantity: Dec
+    average_fill_price: Dec | None
+    fees: dict[str, Dec]
+    reject_code: str | None
+    reject_reason: str | None
+    risk_decision_id: str | None
+    source: str
+    created_at: datetime
+
+
+class PositionOut(BaseModel):
+    account_id: str
+    instrument_id: str
+    deployment_id: str
+    quantity: Dec
+    average_entry_price: Dec
+    realized_pnl: Dec
+    unrealized_pnl: Dec | None
+    fees_paid: Dec
+
+
+class QuoteIn(BaseModel):
+    instrument_id: str
+    bid_price: Dec
+    bid_size: Dec
+    ask_price: Dec
+    ask_size: Dec
+
+
+class InstrumentOut(BaseModel):
+    instrument_id: str
+    venue: str
+    symbol: str
+    asset_class: str
+    base_asset: str
+    quote_asset: str
+    tick_size: Dec
+    lot_size: Dec
+    min_quantity: Dec
+    min_notional: Dec | None
+    status: str
+    reference_price: Dec | None
+    feed_status: str
+
+
+class KillSwitchIn(BaseModel):
+    scope: KillSwitchScope
+    action: KillSwitchAction
+    reason: str = Field(min_length=1)
+    target_id: str | None = None
+
+
+class KillSwitchReleaseIn(BaseModel):
+    reason: str = Field(min_length=1)
+
+
+class KillSwitchOut(BaseModel):
+    kill_switch_id: str
+    scope: KillSwitchScope
+    target_id: str | None
+    action: KillSwitchAction
+    reason: str
+    triggered_by: str
+    triggered_at: datetime
+    active: bool
+    released_by: str | None
+    released_at: datetime | None
+
+
+class RiskLimitIn(BaseModel):
+    limit_type: LimitType
+    threshold: Dec
+
+
+class SyntheticDataIn(BaseModel):
+    start: datetime
+    bars: int = Field(ge=50, le=100_000)
+    interval_seconds: int = Field(default=3600, ge=1)
+    start_price: Dec = Decimal(100)
+    volatility: float = Field(default=0.01, gt=0, le=0.5)
+    drift: float = 0.0
+    seed: int = 7
+
+
+class BacktestIn(BaseModel):
+    strategy: str
+    instrument_id: str
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    initial_capital: Dec = Decimal(100_000)
+    maker_fee_bps: Dec = Decimal(10)
+    taker_fee_bps: Dec = Decimal(10)
+    slippage_bps: Dec = Decimal(1)
+    risk_limits: list[RiskLimitIn] = Field(default_factory=list)
+    data: SyntheticDataIn
+    # "history": the broker's candles for the instrument (bars and interval from `data`); else synthetic.
+    data_source: Literal["synthetic", "history"] = "synthetic"
+    # "market": the instrument's real charges (Indian taxes, crypto fee, forex spread); else flat bps.
+    fees_model: Literal["flat", "market"] = "flat"
+
+
+class TradeOut(BaseModel):
+    instrument_id: str
+    direction: Side
+    quantity: Dec
+    entry_time: datetime
+    exit_time: datetime
+    entry_price: Dec
+    exit_price: Dec
+    gross_pnl: Dec
+    fees: Dec
+    net_pnl: Dec
+
+
+class BacktestOut(BaseModel):
+    reproducibility_hash: str
+    final_equity: Dec
+    metrics: dict[str, float | int | None]
+    order_count: int
+    fill_count: int
+    trades: list[TradeOut]
+    equity_curve: list[tuple[datetime, Dec]]
+    assumptions: list[str]
+    tearsheet: dict[str, Any] | None = None
+
+
+class StrategyTemplateOut(BaseModel):
+    name: str
+    version: str
+    description: str
+    parameters: dict[str, dict[str, Any]]
+
+
+# ---- identity -----------------------------------------------------------------------------------
+
+
+class LoginIn(BaseModel):
+    email: str
+    password: str
+    code: str | None = None
+
+
+class SetupIn(BaseModel):
+    email: str
+    display_name: str
+    password: str
+
+
+class UserOut(BaseModel):
+    user_id: str
+    email: str
+    display_name: str
+    roles: list[str]
+    status: str
+    mfa_enabled: bool
+    last_login_at: datetime | None
+
+
+class MeOut(UserOut):
+    permissions: list[str]
+    auth_method: str
+    mfa_recent: bool
+
+
+class LoginOut(BaseModel):
+    token: str
+    csrf_token: str
+    expires_at: datetime
+    user: MeOut
+
+
+class UserCreateIn(BaseModel):
+    email: str
+    display_name: str
+    password: str
+    roles: list[str]
+
+
+class RolesIn(BaseModel):
+    roles: list[str]
+
+
+class StatusIn(BaseModel):
+    status: str
+
+
+class PasswordChangeIn(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class CodeIn(BaseModel):
+    code: str
+
+
+class MfaEnrollOut(BaseModel):
+    secret: str
+    provisioning_uri: str
+
+
+class RecoveryCodesOut(BaseModel):
+    recovery_codes: list[str]
+
+
+class SessionOut(BaseModel):
+    session_id: str
+    created_at: datetime
+    last_activity_at: datetime
+    ip_address: str
+    user_agent: str
+    current: bool
+
+
+class ApiKeyIn(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    scopes: list[str]
+    days: int = 90
+
+
+class ApiKeyOut(BaseModel):
+    key_id: str
+    name: str
+    scopes: list[str]
+    created_at: datetime
+    expires_at: datetime
+    revoked_at: datetime | None
+    last_used_at: datetime | None
+
+
+class ApiKeyCreatedOut(ApiKeyOut):
+    api_key: str
+
+
+class AuditOut(BaseModel):
+    seq: int
+    audit_id: str
+    at: str
+    actor: str
+    action: str
+    category: str
+    target: str | None
+    outcome: str
+    data: dict[str, Any]
+
+
+# ---- accounts, deployments, risk ------------------------------------------------------------------
+
+
+class AccountOut(BaseModel):
+    account_id: str
+    name: str
+    venue: str
+    mode: str
+    base_currency: str
+    status: str
+    markets: list[str]  # instrument venues this account can trade
+
+
+class AccountStatusIn(BaseModel):
+    status: str
+
+
+class DeploymentIn(BaseModel):
+    strategy: str
+    account_id: str
+    instruments: list[str] = Field(min_length=1)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    interval_seconds: int = Field(default=60, ge=1)
+
+
+class DeploymentOut(BaseModel):
+    deployment_id: str
+    strategy_name: str
+    strategy_version: str
+    account_id: str
+    mode: str
+    parameters: dict[str, Any]
+    instruments: list[str]
+    state: str
+    state_reason: str | None
+    created_by: str
+    approved_by: str | None
+
+
+class RiskLimitOut(BaseModel):
+    limit_type: LimitType
+    threshold: Dec
+    action: str = "REJECT"
+
+
+class RiskProfileIO(BaseModel):
+    name: str
+    scope: str
+    target_id: str | None = None
+    limits: list[RiskLimitOut]
+    restricted_instruments: list[str] = Field(default_factory=list)
+    active: bool = True
+
+
+class OrderModifyIn(BaseModel):
+    quantity: Dec | None = None
+    limit_price: Dec | None = None
+
+
+# ---- connections ----------------------------------------------------------------------------------
+
+
+class ConnectionIn(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    venue: str
+    environment: str = "TESTNET"
+    api_key: str | None = None
+    api_secret: str | None = None
+    base_currency: str = "USD"
+    settings: dict[str, Any] = Field(default_factory=dict)
+
+
+class PinIn(BaseModel):
+    pin: str | None = Field(default=None, pattern=r"^\d{4,6}$")
+
+
+class BrokerLoginOut(BaseModel):
+    login_url: str
+    redirect_uri: str
+
+
+class CredentialsIn(BaseModel):
+    api_key: str = Field(min_length=1)
+    api_secret: str = Field(min_length=1)
+
+
+class WatchlistIn(BaseModel):
+    instruments: list[str]
+
+
+class ConnectionOut(BaseModel):
+    connection_id: str
+    name: str
+    venue: str
+    environment: str
+    account_id: str | None
+    has_credentials: bool
+    status: str
+    last_error: str | None
+    last_tested_at: datetime | None
+    clock_offset_ms: float | None
+    instrument_count: int
+    watchlist: list[str]
+    settings: dict[str, Any]
+    requires_login: bool
+    session_expires_at: datetime | None
+    markets: list[str]

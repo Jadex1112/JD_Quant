@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jdquant"
+version = "0.1.0"
+description = "JD Quant AI - institutional-grade AI-driven quantitative trading platform"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "pydantic>=2.6",
+    "uvicorn>=0.29",
+    "httpx>=0.27",
+    "cryptography>=42",
+    "numpy>=1.26",
+    "anthropic>=1.0",
+    "websockets>=13",  # broker market-data feeds (Dhan, Fyers, Kotak Neo)
+    "tzdata>=2024.1; sys_platform == 'win32'",  # time zones for forex sessions on Windows
+]
+
+[project.optional-dependencies]
+crypto = [
+    "ccxt>=4.5",  # 100+ crypto exchanges, incl. Bitbns, ZebPay and Mudrex
+]
+forecast = [
+    # Kronos candlestick forecasts; the model weights download from Hugging Face on first use
+    "torch>=2.0",
+    "einops>=0.8",
+    "huggingface_hub>=0.33",
+    "safetensors>=0.6",
+    "pandas>=2.2",
+]
+dev = [
+    "pytest>=8",
+    "httpx>=0.27",
+    "ruff>=0.5",
+    "ccxt>=4.5",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+jdquant = ["web_dist/**/*", "forecast/kronos/LICENSE"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+extend-exclude = ["src/jdquant/forecast/kronos"]  # vendored third-party code (Kronos, MIT)
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/jdquant/persistence/store.py" = ["E501"]
+"src/jdquant/ai/prompts.py" = ["E501"]  # prompt prose
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Header", "fastapi.Query", "jdquant.api.deps.require"]
