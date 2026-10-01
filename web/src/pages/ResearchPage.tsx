@@ -1,7 +1,8 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
-import { get, post, type Backtest, type Deployment, type Instrument, type StrategyTemplate, type Tearsheet } from "../api";
+import { ApiError, get, post, type Backtest, type Deployment, type Instrument, type StrategyTemplate, type Tearsheet } from "../api";
 import { useApp } from "../app-state";
+import { InstrumentPicker } from "../components/InstrumentPicker";
 import { Dialog, Empty, Section, useData } from "../components/ui";
 import { num, pct, ratio, signed, time, tone } from "../format";
 
@@ -37,6 +38,7 @@ export function ResearchPage() {
   const [slippage, setSlippage] = useState("1");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<Backtest | null>(null);
+  const [failure, setFailure] = useState("");
   const [dataSource, setDataSource] = useState<"synthetic" | "history">("synthetic");
   const [feesModel, setFeesModel] = useState<"flat" | "market">("market");
   const [tested, setTested] = useState<{ strategy: string; instrumentId: string; parameters: Record<string, unknown>; interval: number } | null>(
@@ -59,6 +61,10 @@ export function ResearchPage() {
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
+    // Clear the previous result so a failed run never leaves an older result looking like this one's.
+    setResult(null);
+    setTested(null);
+    setFailure("");
     const parameters: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(params)) {
       const type = template?.parameters[k]?.type;
@@ -85,6 +91,10 @@ export function ResearchPage() {
           drift: Number(drift),
           seed: Number(seed),
         },
+      }).catch((error: unknown) => {
+        if (!(error instanceof ApiError && error.code === "STEP_UP_REQUIRED"))
+          setFailure(error instanceof ApiError ? error.detail || error.code : String(error));
+        throw error;
       }),
     );
     if (out) {
@@ -110,11 +120,7 @@ export function ResearchPage() {
             </label>
             <label className="field">
               Instrument
-              <select value={instrumentId} onChange={(e) => setInstrumentId(e.target.value)}>
-                {(instruments.data ?? []).map((i) => (
-                  <option key={i.instrument_id}>{i.instrument_id}</option>
-                ))}
-              </select>
+              <InstrumentPicker instruments={instruments.data ?? []} value={instrumentId} onChange={setInstrumentId} />
             </label>
             {template &&
               Object.entries(template.parameters).map(([k, p]) => (
@@ -140,6 +146,13 @@ export function ResearchPage() {
               </select>
             </label>
           </div>
+          {dataSource === "history" && (
+            <p className="small muted" style={{ margin: 0 }}>
+              Real prices come from the instrument&apos;s broker, so connect it first under <NavLink to="/connections">Connections</NavLink>:
+              Fyers for NSE stocks, MCX and currency futures, OANDA for XAU/USD and forex, a crypto exchange for crypto. The
+              built-in demo instruments have no history; pick one your broker added (e.g. NSE:RELIANCE-EQ after connecting Fyers).
+            </p>
+          )}
           <details>
             <summary className="small">Data and costs</summary>
             <div className="form-grid" style={{ marginTop: 10 }}>
@@ -153,7 +166,9 @@ export function ResearchPage() {
               <Field label="Slippage (bps)" value={slippage} set={setSlippage} />
             </div>
             <p className="small muted">
-              Prices are a seeded synthetic random walk, so a run with the same inputs reproduces exactly (same hash).
+              {dataSource === "history"
+                ? "Uses the latest Bars bars of the broker's history at this interval (3600 = 1 hour, 86400 = 1 day); volatility, drift and seed apply only to synthetic data."
+                : "Prices are a seeded synthetic random walk, so a run with the same inputs reproduces exactly (same hash)."}
             </p>
           </details>
           <div className="row end">
@@ -175,7 +190,12 @@ export function ResearchPage() {
           </button>
         </div>
       )}
-      {result ? <BacktestResult result={result} /> : <Empty>Run a backtest to see its equity curve and metrics.</Empty>}
+      {failure && <div className="alert warn">The backtest did not run: {failure}</div>}
+      {result ? (
+        <BacktestResult result={result} />
+      ) : (
+        !failure && <Empty>{busy ? "Running…" : "Run a backtest to see its equity curve and metrics."}</Empty>
+      )}
       {paperFor && tested && <PaperDialog tested={tested} onClose={() => setPaperFor(false)} />}
     </div>
   );

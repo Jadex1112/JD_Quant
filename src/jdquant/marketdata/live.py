@@ -122,6 +122,9 @@ def candle_dict(c: Candle) -> dict[str, Any]:
     }
 
 
+BACKFILL_STEPS_PER_MINUTE = 6
+
+
 class SimulatedFeed:
     """Random-walk quotes for instruments without a live source, for demos (JDQ_DEMO_FEED=1).
 
@@ -188,14 +191,17 @@ class SimulatedFeed:
             live.simulated.add(iid)
             price = self._start_price(instrument)
             rng = random.Random(int(hashlib.sha256(iid.encode()).hexdigest()[:8], 16))
-            sigma = annual_volatility(instrument) * math.sqrt(60 / YEAR_SECONDS)
+            # Several prices a minute, so each one-minute candle has a body and wicks rather than a flat dash.
+            steps = minutes * BACKFILL_STEPS_PER_MINUTE
+            step = 60 / BACKFILL_STEPS_PER_MINUTE
+            sigma = annual_volatility(instrument) * math.sqrt(step / YEAR_SECONDS)
             path = [price]
-            for _ in range(minutes):
+            for _ in range(steps):
                 path.append(path[-1] * (1 + rng.gauss(0, sigma)))
             path.reverse()  # walk backwards from today's price
             tick = float(instrument.tick_size)
             for k, p in enumerate(path):
-                at = now - timedelta(minutes=len(path) - k)
+                at = now - timedelta(seconds=(len(path) - k) * step)
                 mid = round(p / tick) * tick
                 live.on_quote(
                     Quote(

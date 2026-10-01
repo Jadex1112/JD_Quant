@@ -128,3 +128,14 @@ def test_web_ui_served_with_spa_fallback(platform, tmp_path):
     missing_api = web.get("/api/v1/nope")
     assert missing_api.status_code == 404 and missing_api.json()["code"] == "NOT_FOUND"
     assert web.get("/api/v1/health").json()["status"] == "OPERATIONAL"
+
+
+def test_security_headers_allow_only_tradingview_frames(client):
+    csp = client.get("/api/v1/health").headers["Content-Security-Policy"]
+    directives = dict(d.strip().split(" ", 1) for d in csp.split(";"))
+    assert directives["default-src"] == "'self'"  # no third-party scripts in the app's page
+    assert directives["frame-src"].split() == [
+        "https://www.tradingview-widget.com",
+        "https://s.tradingview.com",
+    ]
+    assert directives["frame-ancestors"] == "'none'"

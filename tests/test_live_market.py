@@ -73,5 +73,8 @@ def test_simulated_feed_is_labelled_and_skips_live_sources(platform):
     feed.backfill(live, minutes=30)
     feed.tick()
     assert BTC not in live.simulated and "NSE:RELIANCE" in live.simulated
-    assert len(live.candles("NSE:RELIANCE", 60, 100)) >= 30
+    bars = live.candles("NSE:RELIANCE", 60, 100)
+    assert len(bars) >= 30
+    # several prices per minute, so the demo candles have bodies and wicks rather than flat dashes
+    assert sum(b["high"] > b["low"] for b in bars) > len(bars) // 2
     assert platform.market.reference_price("NSE:RELIANCE") is not None
